@@ -381,19 +381,19 @@ export class QualityGateManager {
   }
 
   public recalculate_gate_status(task_id: string): GateStatus {
-    const requiredGates = this.db
-      .prepare('SELECT id FROM quality_gates WHERE task_id = ? AND enforcement_level = ?')
-      .all(task_id, 'required') as Array<{ id: string }>;
+    const gates = this.db
+      .prepare('SELECT id FROM quality_gates WHERE task_id = ?')
+      .all(task_id) as Array<{ id: string }>;
 
     let gateStatus: GateStatus;
 
-    if (requiredGates.length === 0) {
+    if (gates.length === 0) {
       gateStatus = 'none';
     } else {
       let hasFail = false;
       let hasPending = false;
 
-      for (const gate of requiredGates) {
+      for (const gate of gates) {
         const latest = this.db
           .prepare(
             'SELECT result FROM gate_evaluations WHERE gate_id = ? ORDER BY attempt DESC LIMIT 1',

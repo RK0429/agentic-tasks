@@ -4,6 +4,19 @@ import { EventEmitter } from './event-emitter.js';
 import { TasksError } from './errors.js';
 import type { TaskLock } from '../types/index.js';
 
+export type StaleCleanupReason = 'heartbeat_timeout' | 'context_overflow' | 'manual_cleanup';
+
+export interface StaleLockCleanupInput {
+  stale_session_ids: string[];
+  reason: StaleCleanupReason;
+  agent_id: string;
+}
+
+export interface StaleLockCleanupOutput {
+  released: string[];
+  errors: string[];
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -124,6 +137,91 @@ export class LockManager {
     return {
       ...lock,
       expires_at,
+    };
+  }
+
+  public stale_lock_cleanup(input: StaleLockCleanupInput): StaleLockCleanupOutput {
+    const released: string[] = [];
+    const errors: string[] = [];
+
+    const uniqueSessions = [...new Set(input.stale_session_ids)].filter((session) => session.trim() !== '');
+
+    for (const stale_session_id of uniqueSessions) {
+      try {
+        const tx = this.db.transaction(() => {
+          const lockedTasks = this.db
+            .prepare(
+              `
+              SELECT l.task_id, t.status
+              FROM task_locks l
+              JOIN tasks t ON t.id = l.task_id
+              WHERE l.relay_session_id = ?
+              `,
+            )
+            .all(stale_session_id) as Array<{ task_id: string; status: string }>;
+
+          for (const lock of lockedTasks) {
+            this.db.prepare('DELETE FROM task_locks WHERE task_id = ?').run(lock.task_id);
+
+            this.db
+              .prepare(
+                `
+                UPDATE tasks
+                SET status = ?,
+                    assignee = NULL,
+                    updated_at = ?,
+                    version = version + 1
+                WHERE id = ?
+                `,
+              )
+              .run('to_do', nowIso(), lock.task_id);
+
+            this.eventEmitter.emit_task_event({
+              task_id: lock.task_id,
+              event_type: 'unlocked',
+              data: {
+                released_by: input.agent_id,
+                relay_session_id: stale_session_id,
+                reason: input.reason,
+              },
+              triggered_by: input.agent_id,
+            });
+
+            this.eventEmitter.emit_task_event({
+              task_id: lock.task_id,
+              event_type: 'status_changed',
+              data: {
+                from: lock.status,
+                to: 'to_do',
+                reason: 'stale_lock_cleanup',
+              },
+              triggered_by: input.agent_id,
+            });
+
+            this.eventEmitter.emit_task_event({
+              task_id: lock.task_id,
+              event_type: 'stale_lock_cleaned',
+              data: {
+                relay_session_id: stale_session_id,
+                reason: input.reason,
+              },
+              triggered_by: input.agent_id,
+            });
+
+            released.push(lock.task_id);
+          }
+        });
+
+        tx();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        errors.push(`${stale_session_id}: ${message}`);
+      }
+    }
+
+    return {
+      released,
+      errors,
     };
   }
 

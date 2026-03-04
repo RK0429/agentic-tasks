@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 
+import { AccessControl } from './access-control.js';
 import { DependencyResolver } from './dependency-resolver.js';
 import { EventEmitter } from './event-emitter.js';
 import { TasksError } from './errors.js';
@@ -8,6 +9,7 @@ import { QualityGateManager } from './quality-gate-manager.js';
 import type {
   AcceptanceCriterion,
   CreateTaskInput,
+  ExpectedEffort,
   ListTasksInput,
   Task,
   TaskStatus,
@@ -25,6 +27,27 @@ const VALID_TRANSITIONS: Record<TaskStatus, ReadonlyArray<TaskStatus>> = {
   escalated: ['in_progress', 'blocked', 'archived'],
   archived: [],
 };
+
+const EFFORT_TO_MS: Record<ExpectedEffort, number> = {
+  XS: 1_800_000,
+  S: 3_600_000,
+  M: 7_200_000,
+  L: 14_400_000,
+  XL: 28_800_000,
+};
+
+const STATUS_COMPLETION_WEIGHT: Record<TaskStatus, number> = {
+  backlog: 0,
+  to_do: 0,
+  in_progress: 0.5,
+  review: 0.9,
+  done: 1,
+  blocked: 0,
+  escalated: 0.3,
+  archived: 1,
+};
+
+const WIP_STATUSES: ReadonlyArray<TaskStatus> = ['in_progress', 'review'];
 
 interface TaskRow {
   id: string;
@@ -54,10 +77,17 @@ interface TaskRow {
 }
 
 interface TaskManagerDependencies {
+  access_control?: AccessControl;
   id_generator?: IdGenerator;
   event_emitter?: EventEmitter;
   quality_gate_manager?: QualityGateManager;
   dependency_resolver?: DependencyResolver;
+}
+
+interface GoalProgressRow {
+  id: string;
+  status: TaskStatus;
+  expected_effort: ExpectedEffort | null;
 }
 
 function nowIso(): string {
@@ -78,8 +108,17 @@ function parseJsonObject(value: string | null): Record<string, unknown> | null {
   return JSON.parse(value) as Record<string, unknown>;
 }
 
+function isSystemActor(agent_id: string | null | undefined): boolean {
+  return !agent_id || agent_id === 'system';
+}
+
+function roundsToTwoDecimals(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
 export class TaskManager {
   private readonly db: Database.Database;
+  private readonly accessControl: AccessControl;
   private readonly idGenerator: IdGenerator;
   private readonly eventEmitter: EventEmitter;
   private readonly qualityGateManager: QualityGateManager;
@@ -88,6 +127,7 @@ export class TaskManager {
   public constructor(db: Database.Database, deps: TaskManagerDependencies = {}) {
     this.db = db;
 
+    this.accessControl = deps.access_control ?? new AccessControl(db);
     this.eventEmitter = deps.event_emitter ?? new EventEmitter(db);
     this.idGenerator = deps.id_generator ?? new IdGenerator(db);
     this.qualityGateManager =
@@ -222,7 +262,13 @@ export class TaskManager {
       values.push(filters.assignee);
     }
 
-    const sql = [`SELECT * FROM tasks`, where.length > 0 ? `WHERE ${where.join(' AND ')}` : '', 'ORDER BY created_at DESC', 'LIMIT ?', 'OFFSET ?']
+    const sql = [
+      'SELECT * FROM tasks',
+      where.length > 0 ? `WHERE ${where.join(' AND ')}` : '',
+      'ORDER BY created_at DESC',
+      'LIMIT ?',
+      'OFFSET ?',
+    ]
       .filter(Boolean)
       .join(' ');
 
@@ -232,10 +278,66 @@ export class TaskManager {
     return rows.map((row) => this.toTask(row));
   }
 
-  public updateTask(task_id: string, input: UpdateTaskInput, triggered_by = 'system'): Task {
+  public assignTask(
+    task_id: string,
+    assignee: string | null,
+    triggered_by = 'system',
+    agent_id = triggered_by,
+  ): Task {
     const current = this.getTask(task_id);
     if (!current) {
       throw new TasksError('task_not_found', `task not found: ${task_id}`);
+    }
+
+    this.accessControl.ensure_task_action('assign_task', task_id, agent_id);
+
+    if (assignee && current.task_type === 'task') {
+      const exclude_task_id = WIP_STATUSES.includes(current.status) ? current.id : undefined;
+      this.ensureProjectWipLimit(current.project_id, task_id, triggered_by, exclude_task_id);
+    }
+
+    this.db
+      .prepare(
+        `
+        UPDATE tasks
+        SET assignee = ?,
+            updated_at = ?,
+            version = version + 1
+        WHERE id = ?
+        `,
+      )
+      .run(assignee, nowIso(), task_id);
+
+    this.eventEmitter.emit_task_event({
+      task_id,
+      event_type: 'task_assigned',
+      data: {
+        assignee,
+      },
+      triggered_by,
+    });
+
+    const updated = this.getTask(task_id);
+    if (!updated) {
+      throw new TasksError('task_not_found', `task not found after assign: ${task_id}`);
+    }
+
+    return updated;
+  }
+
+  public updateTask(
+    task_id: string,
+    input: UpdateTaskInput,
+    triggered_by = 'system',
+    agent_id = triggered_by,
+  ): Task {
+    const current = this.getTask(task_id);
+    if (!current) {
+      throw new TasksError('task_not_found', `task not found: ${task_id}`);
+    }
+
+    if (!isSystemActor(agent_id)) {
+      this.accessControl.ensure_task_action('update_task', task_id, agent_id);
     }
 
     if (
@@ -255,10 +357,24 @@ export class TaskManager {
     this.validateTransition(current.status, nextStatus);
 
     if (current.status !== nextStatus) {
-      if ((current.status === 'backlog' || current.status === 'to_do') && nextStatus === 'in_progress') {
+      if (nextStatus === 'in_progress' && !WIP_STATUSES.includes(current.status)) {
         if (!this.dependencyResolver.are_dependencies_resolved(task_id)) {
           throw new TasksError('dependency_not_resolved', 'unresolved dependencies block in_progress');
         }
+
+        this.ensureProjectWipLimit(current.project_id, task_id, triggered_by);
+      }
+
+      if (current.status === 'in_progress' && nextStatus === 'escalated') {
+        this.accessControl.ensure_task_action('escalate_task', task_id, agent_id);
+        this.ensureLockHolder(task_id, agent_id);
+      }
+
+      if (
+        current.status === 'escalated' &&
+        (nextStatus === 'in_progress' || nextStatus === 'blocked')
+      ) {
+        this.accessControl.ensure_parent_assignee(task_id, agent_id);
       }
 
       if (nextStatus === 'done') {
@@ -352,6 +468,25 @@ export class TaskManager {
           triggered_by,
         });
       }
+
+      if (current.status === 'escalated' && nextStatus === 'blocked') {
+        const lock = this.db
+          .prepare('SELECT task_id, agent_id FROM task_locks WHERE task_id = ? LIMIT 1')
+          .get(task_id) as { task_id: string; agent_id: string } | undefined;
+
+        if (lock) {
+          this.db.prepare('DELETE FROM task_locks WHERE task_id = ?').run(task_id);
+          this.eventEmitter.emit_task_event({
+            task_id,
+            event_type: 'unlocked',
+            data: {
+              released_by: triggered_by,
+              reason: 'escalated_to_blocked',
+            },
+            triggered_by,
+          });
+        }
+      }
     });
 
     tx();
@@ -366,10 +501,14 @@ export class TaskManager {
     return updated;
   }
 
-  public deleteTask(task_id: string, triggered_by = 'system'): void {
+  public deleteTask(task_id: string, triggered_by = 'system', agent_id = triggered_by): void {
     const task = this.getTask(task_id);
     if (!task) {
       throw new TasksError('task_not_found', `task not found: ${task_id}`);
+    }
+
+    if (!isSystemActor(agent_id)) {
+      this.accessControl.ensure_task_action('delete_task', task_id, agent_id);
     }
 
     const lock = this.db.prepare('SELECT task_id FROM task_locks WHERE task_id = ?').get(task_id) as
@@ -411,11 +550,49 @@ export class TaskManager {
         },
         triggered_by,
       });
-      this.db.prepare('DELETE FROM task_dependencies WHERE task_id = ? OR depends_on = ?').run(task_id, task_id);
+      this.db
+        .prepare('DELETE FROM task_dependencies WHERE task_id = ? OR depends_on = ?')
+        .run(task_id, task_id);
       this.db.prepare('DELETE FROM tasks WHERE id = ?').run(task_id);
     });
 
     tx();
+  }
+
+  public getProjectWip(project_id: string): { wip_count: number; wip_limit: number } {
+    const project = this.db
+      .prepare('SELECT id, wip_limit FROM projects WHERE id = ? LIMIT 1')
+      .get(project_id) as { id: string; wip_limit: number } | undefined;
+
+    if (!project) {
+      throw new TasksError('project_not_found', `project not found: ${project_id}`);
+    }
+
+    const row = this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS count
+        FROM tasks
+        WHERE project_id = ?
+          AND task_type = 'task'
+          AND status IN ('in_progress', 'review')
+        `,
+      )
+      .get(project_id) as { count: number };
+
+    return {
+      wip_count: row.count,
+      wip_limit: project.wip_limit,
+    };
+  }
+
+  public getGoalProgressPercent(goal_id: string): number {
+    const goal = this.getTask(goal_id);
+    if (!goal || goal.task_type !== 'goal') {
+      throw new TasksError('goal_not_found', `goal not found: ${goal_id}`);
+    }
+
+    return roundsToTwoDecimals(this.computeNodeCompletion(goal_id) * 100);
   }
 
   private validateTransition(from: TaskStatus, to: TaskStatus): void {
@@ -520,6 +697,55 @@ export class TaskManager {
     return defaultProject.id;
   }
 
+  private ensureProjectWipLimit(
+    project_id: string,
+    task_id: string,
+    triggered_by: string,
+    exclude_task_id?: string,
+  ): void {
+    const project = this.db
+      .prepare('SELECT id, wip_limit FROM projects WHERE id = ? LIMIT 1')
+      .get(project_id) as { id: string; wip_limit: number } | undefined;
+
+    if (!project) {
+      throw new TasksError('project_not_found', `project not found: ${project_id}`);
+    }
+
+    let countSql = `
+      SELECT COUNT(*) AS count
+      FROM tasks
+      WHERE project_id = ?
+        AND task_type = 'task'
+        AND status IN ('in_progress', 'review')
+    `;
+
+    const values: Array<string> = [project_id];
+    if (exclude_task_id) {
+      countSql += ' AND id != ?';
+      values.push(exclude_task_id);
+    }
+
+    const wip = this.db.prepare(countSql).get(...values) as { count: number };
+
+    if (wip.count >= project.wip_limit) {
+      this.eventEmitter.emit_task_event({
+        task_id,
+        event_type: 'wip_limit_exceeded',
+        data: {
+          project_id,
+          current: wip.count,
+          limit: project.wip_limit,
+        },
+        triggered_by,
+      });
+
+      throw new TasksError('wip_limit_exceeded', 'Project WIP limit exceeded', {
+        current: wip.count,
+        limit: project.wip_limit,
+      });
+    }
+  }
+
   private ensureChildrenComplete(task_id: string): void {
     const incompleteChildren = this.db
       .prepare(
@@ -542,6 +768,24 @@ export class TaskManager {
           incomplete_children: incompleteChildren.map((child) => child.id),
         },
       );
+    }
+  }
+
+  private ensureLockHolder(task_id: string, agent_id: string): void {
+    if (isSystemActor(agent_id)) {
+      return;
+    }
+
+    const lock = this.db
+      .prepare('SELECT agent_id FROM task_locks WHERE task_id = ? LIMIT 1')
+      .get(task_id) as { agent_id: string } | undefined;
+
+    if (!lock || lock.agent_id !== agent_id) {
+      throw new TasksError('lock_owner_mismatch', 'lock owned by another agent', {
+        task_id,
+        lock_holder: lock?.agent_id ?? null,
+        requested_by: agent_id,
+      });
     }
   }
 
@@ -574,11 +818,9 @@ export class TaskManager {
         continue;
       }
 
-      this.db.prepare('UPDATE tasks SET status = ?, version = version + 1, updated_at = ? WHERE id = ?').run(
-        'archived',
-        now,
-        descendant.id,
-      );
+      this.db
+        .prepare('UPDATE tasks SET status = ?, version = version + 1, updated_at = ? WHERE id = ?')
+        .run('archived', now, descendant.id);
 
       this.eventEmitter.emit_task_event({
         task_id: descendant.id,
@@ -625,11 +867,9 @@ export class TaskManager {
       return;
     }
 
-    this.db.prepare('UPDATE tasks SET status = ?, updated_at = ?, version = version + 1 WHERE id = ?').run(
-      'review',
-      nowIso(),
-      goal.id,
-    );
+    this.db
+      .prepare('UPDATE tasks SET status = ?, updated_at = ?, version = version + 1 WHERE id = ?')
+      .run('review', nowIso(), goal.id);
 
     this.eventEmitter.emit_task_event({
       task_id: goal.id,
@@ -641,6 +881,59 @@ export class TaskManager {
       },
       triggered_by,
     });
+  }
+
+  private computeNodeCompletion(task_id: string): number {
+    const children = this.db
+      .prepare(
+        `
+        SELECT id, status, expected_effort
+        FROM tasks
+        WHERE parent_task_id = ?
+          AND task_type = 'task'
+        ORDER BY created_at ASC
+        `,
+      )
+      .all(task_id) as GoalProgressRow[];
+
+    if (children.length === 0) {
+      const current = this.db
+        .prepare('SELECT status FROM tasks WHERE id = ? LIMIT 1')
+        .get(task_id) as { status: TaskStatus } | undefined;
+
+      if (!current) {
+        throw new TasksError('task_not_found', `task not found: ${task_id}`);
+      }
+
+      return STATUS_COMPLETION_WEIGHT[current.status];
+    }
+
+    const weighted = children.reduce(
+      (acc, child) => {
+        const weight = this.effortToMs(child.expected_effort);
+        const completion = this.computeNodeCompletion(child.id);
+
+        return {
+          totalWeight: acc.totalWeight + weight,
+          completedWeight: acc.completedWeight + completion * weight,
+        };
+      },
+      { totalWeight: 0, completedWeight: 0 },
+    );
+
+    if (weighted.totalWeight <= 0) {
+      return 0;
+    }
+
+    return weighted.completedWeight / weighted.totalWeight;
+  }
+
+  private effortToMs(expected_effort: ExpectedEffort | null): number {
+    if (!expected_effort) {
+      return EFFORT_TO_MS.M;
+    }
+
+    return EFFORT_TO_MS[expected_effort];
   }
 
   private toTask(row: TaskRow): Task {

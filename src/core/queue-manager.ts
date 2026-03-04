@@ -1,6 +1,8 @@
 import Database from 'better-sqlite3';
 
 import { DependencyResolver } from './dependency-resolver.js';
+import { EventEmitter } from './event-emitter.js';
+import { TasksError } from './errors.js';
 import type { Task } from '../types/index.js';
 
 const PRIORITY_SCORE: Record<Task['priority'], number> = {
@@ -45,13 +47,21 @@ interface QueueTaskRow {
 export class QueueManager {
   private readonly db: Database.Database;
   private readonly dependencyResolver: DependencyResolver;
+  private readonly eventEmitter: EventEmitter;
 
-  public constructor(db: Database.Database, dependencyResolver: DependencyResolver) {
+  public constructor(
+    db: Database.Database,
+    dependencyResolver: DependencyResolver,
+    eventEmitter: EventEmitter,
+  ) {
     this.db = db;
     this.dependencyResolver = dependencyResolver;
+    this.eventEmitter = eventEmitter;
   }
 
   public next_task(input: NextTaskInput): Task | null {
+    this.ensureProjectWipLimit(input.project_id, input.assignee ?? 'system');
+
     const rows = this.db
       .prepare(
         `
@@ -89,5 +99,61 @@ export class QueueManager {
         : [],
       metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : null,
     };
+  }
+
+  private ensureProjectWipLimit(project_id: string, triggered_by: string): void {
+    const project = this.db
+      .prepare('SELECT id, wip_limit FROM projects WHERE id = ? LIMIT 1')
+      .get(project_id) as { id: string; wip_limit: number } | undefined;
+
+    if (!project) {
+      throw new TasksError('project_not_found', `project not found: ${project_id}`);
+    }
+
+    const wip = this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS count
+        FROM tasks
+        WHERE project_id = ?
+          AND task_type = 'task'
+          AND status IN ('in_progress', 'review')
+        `,
+      )
+      .get(project_id) as { count: number };
+
+    if (wip.count >= project.wip_limit) {
+      const eventTask = this.db
+        .prepare(
+          `
+          SELECT id
+          FROM tasks
+          WHERE project_id = ?
+            AND task_type = 'task'
+          ORDER BY created_at ASC
+          LIMIT 1
+          `,
+        )
+        .get(project_id) as { id: string } | undefined;
+
+      if (eventTask) {
+        this.eventEmitter.emit_task_event({
+          task_id: eventTask.id,
+          event_type: 'wip_limit_exceeded',
+          data: {
+            project_id,
+            current: wip.count,
+            limit: project.wip_limit,
+            source: 'next_task',
+          },
+          triggered_by,
+        });
+      }
+
+      throw new TasksError('wip_limit_exceeded', 'Project WIP limit exceeded', {
+        current: wip.count,
+        limit: project.wip_limit,
+      });
+    }
   }
 }
