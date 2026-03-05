@@ -1,22 +1,51 @@
 {
-  "name": "agentic-tasks",
+  "name": "@rk0429/agentic-tasks",
   "version": "0.1.0",
-  "description": "agentic-tasks: AIエージェント向けタスク管理システム",
+  "description": "AI agent task management system with MCP server, SQLite storage, and orchestration protocol",
   "type": "module",
+  "license": "Apache-2.0",
+  "author": "RK0429",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RK0429/agentic-tasks.git"
+  },
+  "homepage": "https://github.com/RK0429/agentic-tasks",
+  "bugs": {
+    "url": "https://github.com/RK0429/agentic-tasks/issues"
+  },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./mcp-server": {
+      "types": "./dist/mcp-server/index.d.ts",
+      "import": "./dist/mcp-server/index.js"
+    }
   },
   "bin": {
-    "tasks": "dist/cli/tasks.js"
+    "agentic-tasks": "dist/cli/tasks.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ext .ts",
     "format": "prettier --write .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "tasks": "tsx src/cli/tasks.ts"
+    "tasks": "tsx src/cli/tasks.ts",
+    "prepublishOnly": "pnpm test && pnpm build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
