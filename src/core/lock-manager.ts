@@ -2,17 +2,33 @@ import Database from 'better-sqlite3';
 
 import { EventEmitter } from './event-emitter.js';
 import { TasksError } from './errors.js';
-import type { TaskLock } from '../types/index.js';
+import type { TaskLock, TaskStatus } from '../types/index.js';
 
-export type StaleCleanupReason = 'heartbeat_timeout' | 'context_overflow' | 'manual_cleanup';
+export type CanonicalStaleCleanupReason =
+  | 'heartbeat_timeout'
+  | 'process_crash'
+  | 'context_overflow'
+  | 'session_timeout'
+  | 'manual_cleanup';
+
+export type StaleCleanupReason = CanonicalStaleCleanupReason | 'heartbeat_failure';
 
 export interface StaleLockCleanupInput {
-  stale_session_ids: string[];
+  stale_session_ids?: string[];
+  relay_session_id?: string;
   reason: StaleCleanupReason;
-  agent_id: string;
+  agent_id?: string;
 }
 
 export interface StaleLockCleanupOutput {
+  cleaned_up: boolean;
+  released_tasks: Array<{
+    task_id: string;
+    previous_status: TaskStatus;
+    new_status: 'to_do';
+  }>;
+  events_emitted: number;
+  normalized_reason: CanonicalStaleCleanupReason;
   released: string[];
   errors: string[];
 }
@@ -23,6 +39,32 @@ function nowIso(): string {
 
 function addMs(dateIso: string, ms: number): string {
   return new Date(new Date(dateIso).getTime() + ms).toISOString();
+}
+
+function normalizeReason(reason: StaleCleanupReason): CanonicalStaleCleanupReason {
+  if (reason === 'heartbeat_failure') {
+    return 'heartbeat_timeout';
+  }
+
+  return reason;
+}
+
+function normalizeSessionIds(input: StaleLockCleanupInput): string[] {
+  const sessions = new Set<string>();
+
+  for (const session of input.stale_session_ids ?? []) {
+    const normalized = session.trim();
+    if (normalized !== '') {
+      sessions.add(normalized);
+    }
+  }
+
+  const single = input.relay_session_id?.trim();
+  if (single) {
+    sessions.add(single);
+  }
+
+  return [...sessions];
 }
 
 export class LockManager {
@@ -142,9 +184,19 @@ export class LockManager {
 
   public stale_lock_cleanup(input: StaleLockCleanupInput): StaleLockCleanupOutput {
     const released: string[] = [];
+    const released_tasks: StaleLockCleanupOutput['released_tasks'] = [];
     const errors: string[] = [];
+    let events_emitted = 0;
+    const normalized_reason = normalizeReason(input.reason);
+    const actor = input.agent_id?.trim() === '' ? 'system' : (input.agent_id ?? 'system');
 
-    const uniqueSessions = [...new Set(input.stale_session_ids)].filter((session) => session.trim() !== '');
+    const uniqueSessions = normalizeSessionIds(input);
+    if (uniqueSessions.length === 0) {
+      throw new TasksError(
+        'invalid_input',
+        'relay_session_id or stale_session_ids is required for stale_lock_cleanup',
+      );
+    }
 
     for (const stale_session_id of uniqueSessions) {
       try {
@@ -158,7 +210,7 @@ export class LockManager {
               WHERE l.relay_session_id = ?
               `,
             )
-            .all(stale_session_id) as Array<{ task_id: string; status: string }>;
+            .all(stale_session_id) as Array<{ task_id: string; status: TaskStatus }>;
 
           for (const lock of lockedTasks) {
             this.db.prepare('DELETE FROM task_locks WHERE task_id = ?').run(lock.task_id);
@@ -180,12 +232,13 @@ export class LockManager {
               task_id: lock.task_id,
               event_type: 'unlocked',
               data: {
-                released_by: input.agent_id,
+                released_by: actor,
                 relay_session_id: stale_session_id,
-                reason: input.reason,
+                reason: normalized_reason,
               },
-              triggered_by: input.agent_id,
+              triggered_by: actor,
             });
+            events_emitted += 1;
 
             this.eventEmitter.emit_task_event({
               task_id: lock.task_id,
@@ -195,20 +248,27 @@ export class LockManager {
                 to: 'to_do',
                 reason: 'stale_lock_cleanup',
               },
-              triggered_by: input.agent_id,
+              triggered_by: actor,
             });
+            events_emitted += 1;
 
             this.eventEmitter.emit_task_event({
               task_id: lock.task_id,
               event_type: 'stale_lock_cleaned',
               data: {
                 relay_session_id: stale_session_id,
-                reason: input.reason,
+                reason: normalized_reason,
               },
-              triggered_by: input.agent_id,
+              triggered_by: actor,
             });
+            events_emitted += 1;
 
             released.push(lock.task_id);
+            released_tasks.push({
+              task_id: lock.task_id,
+              previous_status: lock.status,
+              new_status: 'to_do',
+            });
           }
         });
 
@@ -220,6 +280,10 @@ export class LockManager {
     }
 
     return {
+      cleaned_up: released.length > 0,
+      released_tasks,
+      events_emitted,
+      normalized_reason,
       released,
       errors,
     };

@@ -10,8 +10,11 @@ import {
   EventEmitter,
   IdGenerator,
   LockManager,
+  ProjectManager,
   QualityGateManager,
   QueueManager,
+  Scheduler,
+  SprintManager,
   TaskManager,
   TasksRuntime,
   openDatabase,
@@ -27,6 +30,9 @@ export interface TestContext {
   idGenerator: IdGenerator;
   lockManager: LockManager;
   queueManager: QueueManager;
+  projectManager: ProjectManager;
+  sprintManager: SprintManager;
+  scheduler: Scheduler;
   runtime: TasksRuntime;
   cleanup: () => void;
 }
@@ -50,14 +56,20 @@ export function createTestContext(): TestContext {
   });
   const lockManager = new LockManager(db, eventEmitter);
   const queueManager = new QueueManager(db, dependencyResolver, eventEmitter);
+  const projectManager = new ProjectManager(db, idGenerator);
+  const sprintManager = new SprintManager(db, idGenerator, eventEmitter);
+  const scheduler = new Scheduler(db, idGenerator, taskManager, eventEmitter);
   const runtime = new TasksRuntime(db, {
     access_control: accessControl,
     dependency_resolver: dependencyResolver,
     event_emitter: eventEmitter,
     id_generator: idGenerator,
     lock_manager: lockManager,
+    project_manager: projectManager,
     queue_manager: queueManager,
     quality_gate_manager: qualityGateManager,
+    scheduler,
+    sprint_manager: sprintManager,
     task_manager: taskManager,
   });
 
@@ -71,6 +83,9 @@ export function createTestContext(): TestContext {
     idGenerator,
     lockManager,
     queueManager,
+    projectManager,
+    sprintManager,
+    scheduler,
     runtime,
     cleanup: () => {
       db.close();

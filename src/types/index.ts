@@ -42,6 +42,7 @@ export const ENFORCEMENT_LEVELS = ['required', 'recommended'] as const;
 export const GATE_RESULTS = ['pass', 'fail'] as const;
 
 export const DEPENDENCY_TYPES = ['finish_to_start', 'start_to_start'] as const;
+export const SPRINT_STATUSES = ['planned', 'active', 'completed'] as const;
 
 export const COUNTER_KEYS = ['TASK', 'GOAL', 'GATE', 'PROJ', 'SPRINT', 'SCHED'] as const;
 
@@ -55,6 +56,7 @@ export type GateType = (typeof GATE_TYPES)[number];
 export type EnforcementLevel = (typeof ENFORCEMENT_LEVELS)[number];
 export type GateResult = (typeof GATE_RESULTS)[number];
 export type DependencyType = (typeof DEPENDENCY_TYPES)[number];
+export type SprintStatus = (typeof SPRINT_STATUSES)[number];
 export type CounterKey = (typeof COUNTER_KEYS)[number];
 
 export interface AcceptanceCriterion {
@@ -234,4 +236,99 @@ export interface TasksErrorPayload {
   code: string;
   message: string;
   details?: Record<string, unknown>;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  metadata: Record<string, unknown> | null;
+  wip_limit: number;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateProjectInput {
+  name: string;
+  description?: string;
+  metadata?: Record<string, unknown> | null;
+  wip_limit?: number;
+}
+
+export interface UpdateProjectInput {
+  name?: string;
+  description?: string;
+  metadata?: Record<string, unknown> | null;
+  wip_limit?: number;
+}
+
+export interface Sprint {
+  id: string;
+  project_id: string;
+  name: string;
+  description: string;
+  phase_number: number;
+  start_date: string;
+  end_date: string;
+  status: SprintStatus;
+  created_at: string;
+}
+
+export interface CreateSprintInput {
+  project_id: string;
+  name: string;
+  description?: string;
+  phase_number?: number;
+  start_date: string;
+  end_date: string;
+  status?: SprintStatus;
+}
+
+export interface UpdateSprintInput {
+  name?: string;
+  description?: string;
+  phase_number?: number;
+  start_date?: string;
+  end_date?: string;
+  status?: SprintStatus;
+}
+
+export interface ListSprintsInput {
+  project_id?: string;
+  status?: SprintStatus;
+}
+
+export interface Schedule {
+  id: string;
+  name: string;
+  cron: string;
+  task_template: CreateTaskInput;
+  project_id: string;
+  enabled: boolean;
+  max_instances: number;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  created_at: string;
+}
+
+export interface CreateScheduleInput {
+  name: string;
+  cron: string;
+  task_template: CreateTaskInput;
+  project_id: string;
+  enabled?: boolean;
+  max_instances?: number;
+  next_run_at?: string | null;
+}
+
+export interface UpdateScheduleInput {
+  name?: string;
+  cron?: string;
+  task_template?: CreateTaskInput;
+  project_id?: string;
+  enabled?: boolean;
+  max_instances?: number;
+  last_run_at?: string | null;
+  next_run_at?: string | null;
 }

@@ -120,4 +120,92 @@ describe('CLI integration', () => {
     const deleted = runCli(['--db', dbPath, 'delete', task2.task.id]) as { deleted: boolean };
     expect(deleted.deleted).toBe(true);
   });
+
+  it('supports project/sprint/schedule advanced commands', () => {
+    tempDir = mkdtempSync(path.join(os.tmpdir(), 'agentic-tasks-cli-'));
+    const dbPath = path.join(tempDir, 'tasks.db');
+
+    runCli(['--db', dbPath, 'init']);
+
+    const project = runCli([
+      '--db',
+      dbPath,
+      'project',
+      'create',
+      '--name',
+      'CLI Advanced Project',
+      '--wip-limit',
+      '3',
+    ]) as { project: { id: string; wip_limit: number } };
+
+    expect(project.project.id).toMatch(/^PROJ-/);
+    expect(project.project.wip_limit).toBe(3);
+
+    const sprint = runCli([
+      '--db',
+      dbPath,
+      'sprint',
+      'create',
+      '--project-id',
+      project.project.id,
+      '--name',
+      'Sprint CLI',
+      '--start-date',
+      '2026-03-01',
+      '--end-date',
+      '2026-03-14',
+      '--status',
+      'active',
+      '--phase-number',
+      '5',
+    ]) as { sprint: { id: string; status: string } };
+
+    expect(sprint.sprint.id).toMatch(/^SPRINT-/);
+    expect(sprint.sprint.status).toBe('active');
+
+    const goal = runCli([
+      '--db',
+      dbPath,
+      'create',
+      '--title',
+      'Schedule Goal',
+      '--task-type',
+      'goal',
+      '--project-id',
+      project.project.id,
+    ]) as { task: { id: string } };
+
+    const schedule = runCli([
+      '--db',
+      dbPath,
+      'schedule',
+      'create',
+      '--name',
+      'CLI Schedule',
+      '--project-id',
+      project.project.id,
+      '--cron',
+      '* * * * *',
+      '--task-template',
+      JSON.stringify({
+        title: 'From CLI Schedule',
+        task_type: 'task',
+        parent_task_id: goal.task.id,
+      }),
+    ]) as { schedule: { id: string } };
+
+    expect(schedule.schedule.id).toMatch(/^SCHED-/);
+
+    const run = runCli(['--db', dbPath, 'schedule', 'run']) as { created_tasks: string[] };
+    expect(Array.isArray(run.created_tasks)).toBe(true);
+
+    const completed = runCli([
+      '--db',
+      dbPath,
+      'sprint',
+      'complete',
+      sprint.sprint.id,
+    ]) as { sprint: { status: string } };
+    expect(completed.sprint.status).toBe('completed');
+  });
 });

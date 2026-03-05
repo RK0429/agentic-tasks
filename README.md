@@ -1,7 +1,7 @@
 # agentic-tasks
 
 agentic-tasks は AI エージェント向けのタスク管理システムです。  
-Phase 1（Core Foundation）として、SQLite スキーマ、コアモジュール、CLI、テストを実装しています。
+Phase 5（Advanced Features）として、タスク管理に加えてスケジューリング、プロジェクト管理、スプリント管理を実装しています。
 
 ## 技術スタック
 
@@ -47,6 +47,36 @@ pnpm tasks deps add --task-id TASK-002 --depends-on TASK-001
 
 # 依存関係一覧
 pnpm tasks deps list TASK-002
+
+# プロジェクト作成
+pnpm tasks project create --name "Project A" --wip-limit 5
+
+# スプリント作成
+pnpm tasks sprint create \
+  --project-id PROJ-001 \
+  --name "Sprint 1" \
+  --start-date 2026-03-01 \
+  --end-date 2026-03-14 \
+  --phase-number 5
+
+# スケジュール作成
+pnpm tasks schedule create \
+  --name "Daily Task" \
+  --project-id PROJ-001 \
+  --cron "0 9 * * *" \
+  --task-template '{"title":"Daily Check","task_type":"task","parent_task_id":"GOAL-001"}'
+
+# スケジューラ手動実行
+pnpm tasks schedule run
+
+# MDTM -> SQLite 取り込み
+pnpm tasks migrate import ./.project/tasks --clear-existing
+
+# SQLite -> MDTM エクスポート
+pnpm tasks migrate export ./tmp/mdtm-export
+
+# 移行整合性チェック
+pnpm tasks migrate verify
 ```
 
 必要に応じて `--db <path>` で DB パスを指定できます（デフォルト: `.tasks/agentic-tasks.db`）。
@@ -68,6 +98,8 @@ agentic-tasks/
 │   │   ├── schema.ts
 │   │   └── migrations/
 │   ├── mcp-server/
+│   ├── hooks/
+│   ├── migration/
 │   ├── cli/
 │   ├── types/
 │   └── index.ts

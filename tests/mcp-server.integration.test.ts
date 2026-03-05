@@ -55,6 +55,7 @@ describe('MCP server integration', () => {
     for (const required of [
       'decompose_task',
       'claim_and_start',
+      'extend_lock',
       'complete_task',
       'escalate_task',
       'delegate_task',
@@ -63,15 +64,49 @@ describe('MCP server integration', () => {
       'create_goal',
       'list_goal_tree',
       'get_execution_view',
+      'create_project',
+      'list_projects',
+      'create_sprint',
+      'complete_sprint',
+      'create_schedule',
+      'run_scheduler',
     ]) {
       expect(toolNames.has(required)).toBe(true);
     }
+
+    const createProject = (await client.callTool({
+      name: 'create_project',
+      arguments: {
+        name: 'MCP Advanced Project',
+        wip_limit: 4,
+      },
+    })) as CallToolResult;
+    const createdProjectPayload = parseToolText(createProject);
+    const project = createdProjectPayload.project as { id: string; wip_limit: number };
+    expect(project.id).toMatch(/^PROJ-/);
+    expect(project.wip_limit).toBe(4);
+
+    const createSprint = (await client.callTool({
+      name: 'create_sprint',
+      arguments: {
+        project_id: project.id,
+        name: 'MCP Sprint',
+        start_date: '2026-03-01',
+        end_date: '2026-03-14',
+        phase_number: 5,
+        status: 'active',
+      },
+    })) as CallToolResult;
+    const sprintPayload = parseToolText(createSprint);
+    const sprint = sprintPayload.sprint as { id: string; status: string };
+    expect(sprint.id).toMatch(/^SPRINT-/);
+    expect(sprint.status).toBe('active');
 
     const goalResult = (await client.callTool({
       name: 'create_goal',
       arguments: {
         title: 'MCP Goal',
-        project_id: 'PROJ-001',
+        project_id: project.id,
         agent_id: 'lead',
       },
     })) as CallToolResult;
@@ -86,7 +121,7 @@ describe('MCP server integration', () => {
         title: 'Parent Task',
         task_type: 'task',
         parent_task_id: goalId,
-        project_id: 'PROJ-001',
+        project_id: project.id,
         agent_id: 'lead',
       },
     })) as CallToolResult;
@@ -195,5 +230,39 @@ describe('MCP server integration', () => {
     expect(subtaskPayload.success).toBe(true);
     const summary = subtaskPayload.summary as { by_status: Record<string, number> };
     expect(summary.by_status.done).toBe(2);
+
+    const scheduleResult = (await client.callTool({
+      name: 'create_schedule',
+      arguments: {
+        name: 'MCP Schedule',
+        cron: '* * * * *',
+        project_id: project.id,
+        task_template: {
+          title: 'MCP Scheduled Task',
+          task_type: 'task',
+          parent_task_id: goalId,
+        },
+      },
+    })) as CallToolResult;
+    const schedulePayload = parseToolText(scheduleResult);
+    expect(schedulePayload.success).toBe(true);
+
+    const runSchedule = (await client.callTool({
+      name: 'run_scheduler',
+      arguments: {},
+    })) as CallToolResult;
+    const runPayload = parseToolText(runSchedule);
+    expect(runPayload.success).toBe(true);
+    expect(Array.isArray(runPayload.created_tasks)).toBe(true);
+
+    const completeSprint = (await client.callTool({
+      name: 'complete_sprint',
+      arguments: {
+        sprint_id: sprint.id,
+      },
+    })) as CallToolResult;
+    const completedSprintPayload = parseToolText(completeSprint);
+    expect(completedSprintPayload.success).toBe(true);
+    expect((completedSprintPayload.sprint as { status: string }).status).toBe('completed');
   });
 });

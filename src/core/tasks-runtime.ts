@@ -6,17 +6,30 @@ import { EventEmitter } from './event-emitter.js';
 import { TasksError } from './errors.js';
 import { IdGenerator } from './id-generator.js';
 import { LockManager, type StaleLockCleanupInput, type StaleLockCleanupOutput } from './lock-manager.js';
+import { ProjectManager } from './project-manager.js';
 import { QueueManager } from './queue-manager.js';
 import { QualityGateManager } from './quality-gate-manager.js';
+import { Scheduler } from './scheduler.js';
+import { SprintManager } from './sprint-manager.js';
 import { TaskManager } from './task-manager.js';
 import type {
+  CreateProjectInput,
   CreateQualityGateInput,
+  CreateScheduleInput,
+  CreateSprintInput,
   CreateTaskInput,
   ExpectedEffort,
   GateResult,
+  ListSprintsInput,
+  Project,
   QualityGate,
+  Schedule,
+  Sprint,
   Task,
   TaskStatus,
+  UpdateProjectInput,
+  UpdateScheduleInput,
+  UpdateSprintInput,
   UpdateTaskInput,
 } from '../types/index.js';
 
@@ -81,6 +94,12 @@ export interface ClaimAndStartInput {
   agent_id: string;
   relay_session_id?: string;
   lock_duration_ms?: number;
+}
+
+export interface ExtendLockInput {
+  task_id: string;
+  relay_session_id?: string;
+  extend_ms?: number;
 }
 
 export interface CompleteTaskInput {
@@ -219,8 +238,11 @@ export interface TasksRuntimeDependencies {
   event_emitter?: EventEmitter;
   id_generator?: IdGenerator;
   lock_manager?: LockManager;
+  project_manager?: ProjectManager;
   queue_manager?: QueueManager;
   quality_gate_manager?: QualityGateManager;
+  scheduler?: Scheduler;
+  sprint_manager?: SprintManager;
   task_manager?: TaskManager;
 }
 
@@ -234,6 +256,9 @@ export class TasksRuntime {
   private readonly taskManager: TaskManager;
   private readonly lockManager: LockManager;
   private readonly queueManager: QueueManager;
+  private readonly projectManager: ProjectManager;
+  private readonly sprintManager: SprintManager;
+  private readonly scheduler: Scheduler;
 
   public constructor(db: Database.Database, deps: TasksRuntimeDependencies = {}) {
     this.db = db;
@@ -257,6 +282,12 @@ export class TasksRuntime {
     this.lockManager = deps.lock_manager ?? new LockManager(db, this.eventEmitter);
     this.queueManager =
       deps.queue_manager ?? new QueueManager(db, this.dependencyResolver, this.eventEmitter);
+    this.projectManager = deps.project_manager ?? new ProjectManager(db, this.idGenerator);
+    this.sprintManager =
+      deps.sprint_manager ?? new SprintManager(db, this.idGenerator, this.eventEmitter);
+    this.scheduler =
+      deps.scheduler ??
+      new Scheduler(db, this.idGenerator, this.taskManager, this.eventEmitter);
   }
 
   public create_task(input: CreateTaskInput, agent_id: string): Task {
@@ -279,6 +310,107 @@ export class TasksRuntime {
       task_id,
       deleted: true,
     };
+  }
+
+  public create_project(input: CreateProjectInput): { project: Project } {
+    return {
+      project: this.projectManager.createProject(input),
+    };
+  }
+
+  public get_project(project_id: string): { project: Project } {
+    const project = this.projectManager.getProject(project_id);
+    if (!project) {
+      throw new TasksError('project_not_found', `project not found: ${project_id}`);
+    }
+
+    return { project };
+  }
+
+  public update_project(project_id: string, input: UpdateProjectInput): { project: Project } {
+    return {
+      project: this.projectManager.updateProject(project_id, input),
+    };
+  }
+
+  public list_projects(): { projects: Project[] } {
+    return {
+      projects: this.projectManager.listProjects(),
+    };
+  }
+
+  public delete_project(project_id: string): { project_id: string; deleted: true } {
+    this.projectManager.deleteProject(project_id);
+    return {
+      project_id,
+      deleted: true,
+    };
+  }
+
+  public create_sprint(input: CreateSprintInput): { sprint: Sprint } {
+    return {
+      sprint: this.sprintManager.createSprint(input),
+    };
+  }
+
+  public update_sprint(sprint_id: string, input: UpdateSprintInput): { sprint: Sprint } {
+    return {
+      sprint: this.sprintManager.updateSprint(sprint_id, input),
+    };
+  }
+
+  public list_sprints(input: ListSprintsInput = {}): { sprints: Sprint[] } {
+    return {
+      sprints: this.sprintManager.listSprints(input),
+    };
+  }
+
+  public complete_sprint(input: { sprint_id: string; agent_id?: string }): {
+    sprint: Sprint;
+    moved_tasks: string[];
+  } {
+    return this.sprintManager.completeSprint(input.sprint_id, input.agent_id ?? 'system');
+  }
+
+  public create_schedule(input: CreateScheduleInput): { schedule: Schedule } {
+    return {
+      schedule: this.scheduler.createSchedule(input),
+    };
+  }
+
+  public get_schedule(schedule_id: string): { schedule: Schedule } {
+    const schedule = this.scheduler.getSchedule(schedule_id);
+    if (!schedule) {
+      throw new TasksError('schedule_not_found', `schedule not found: ${schedule_id}`);
+    }
+
+    return {
+      schedule,
+    };
+  }
+
+  public update_schedule(schedule_id: string, input: UpdateScheduleInput): { schedule: Schedule } {
+    return {
+      schedule: this.scheduler.updateSchedule(schedule_id, input),
+    };
+  }
+
+  public delete_schedule(schedule_id: string): { schedule_id: string; deleted: true } {
+    this.scheduler.deleteSchedule(schedule_id);
+    return {
+      schedule_id,
+      deleted: true,
+    };
+  }
+
+  public list_schedules(project_id?: string): { schedules: Schedule[] } {
+    return {
+      schedules: this.scheduler.listSchedules(project_id),
+    };
+  }
+
+  public run_scheduler(): { created_tasks: string[] } {
+    return this.scheduler.checkAndRun();
   }
 
   public get_task(task_id: string, include_dependencies = true): {
@@ -409,6 +541,36 @@ export class TasksRuntime {
     };
   }
 
+  public extend_lock(input: ExtendLockInput): {
+    success: true;
+    extended: true;
+    new_expires_at: string;
+  } {
+    const lock = this.lockManager.get_lock(input.task_id);
+    if (!lock) {
+      throw new TasksError('not_locked', `task is not locked: ${input.task_id}`);
+    }
+
+    if (
+      input.relay_session_id &&
+      lock.relay_session_id &&
+      lock.relay_session_id !== input.relay_session_id
+    ) {
+      throw new TasksError('session_mismatch', 'lock relay_session_id mismatch', {
+        task_id: input.task_id,
+        expected_session_id: lock.relay_session_id,
+        actual_session_id: input.relay_session_id,
+      });
+    }
+
+    const extended = this.lockManager.extend_lock(input.task_id, input.extend_ms);
+    return {
+      success: true,
+      extended: true,
+      new_expires_at: extended.expires_at,
+    };
+  }
+
   public resolve_dependencies(task_id: string): {
     task_id: string;
     is_resolved: boolean;
@@ -438,34 +600,63 @@ export class TasksRuntime {
       throw new TasksError('invalid_task_type', 'goal cannot be claimed');
     }
 
-    if (task.status !== 'backlog' && task.status !== 'to_do') {
-      throw new TasksError('invalid_status', 'only backlog or to_do task can be claimed', {
-        status: task.status,
+    const existingLock = this.lockManager.get_lock(task.id);
+    const hasActiveLock = Boolean(
+      existingLock && new Date(existingLock.expires_at).getTime() > Date.now(),
+    );
+    const isReclaimableInProgress = task.status === 'in_progress' && !hasActiveLock;
+
+    if (
+      task.status === 'in_progress' &&
+      hasActiveLock &&
+      existingLock &&
+      existingLock.agent_id !== input.agent_id
+    ) {
+      throw new TasksError('lock_conflict', 'task is already locked', {
+        task_id: task.id,
+        lock_holder: existingLock.agent_id,
+        expires_at: existingLock.expires_at,
       });
     }
 
-    if (!this.dependencyResolver.are_dependencies_resolved(task.id)) {
+    if (
+      task.status !== 'backlog' &&
+      task.status !== 'to_do' &&
+      !isReclaimableInProgress
+    ) {
+      throw new TasksError(
+        'invalid_status',
+        'only backlog/to_do task or stale in_progress task can be claimed',
+        {
+          status: task.status,
+        },
+      );
+    }
+
+    if (task.status !== 'in_progress' && !this.dependencyResolver.are_dependencies_resolved(task.id)) {
       throw new TasksError('dependency_not_resolved', 'unresolved dependencies block in_progress');
     }
 
-    const wip = this.taskManager.getProjectWip(task.project_id);
-    if (wip.wip_count >= wip.wip_limit) {
-      this.eventEmitter.emit_task_event({
-        task_id: task.id,
-        event_type: 'wip_limit_exceeded',
-        data: {
-          project_id: task.project_id,
+    if (task.status !== 'in_progress') {
+      const wip = this.taskManager.getProjectWip(task.project_id);
+      if (wip.wip_count >= wip.wip_limit) {
+        this.eventEmitter.emit_task_event({
+          task_id: task.id,
+          event_type: 'wip_limit_exceeded',
+          data: {
+            project_id: task.project_id,
+            current: wip.wip_count,
+            limit: wip.wip_limit,
+            source: 'claim_and_start',
+          },
+          triggered_by: input.agent_id,
+        });
+
+        throw new TasksError('wip_limit_exceeded', 'Project WIP limit exceeded', {
           current: wip.wip_count,
           limit: wip.wip_limit,
-          source: 'claim_and_start',
-        },
-        triggered_by: input.agent_id,
-      });
-
-      throw new TasksError('wip_limit_exceeded', 'Project WIP limit exceeded', {
-        current: wip.wip_count,
-        limit: wip.wip_limit,
-      });
+        });
+      }
     }
 
     const lock_duration_ms = input.lock_duration_ms ?? 3_600_000;
@@ -526,15 +717,28 @@ export class TasksRuntime {
         triggered_by: input.agent_id,
       });
 
-      this.eventEmitter.emit_task_event({
-        task_id: task.id,
-        event_type: 'status_changed',
-        data: {
-          from: task.status,
-          to: 'in_progress',
-        },
-        triggered_by: input.agent_id,
-      });
+      if (task.status !== 'in_progress') {
+        this.eventEmitter.emit_task_event({
+          task_id: task.id,
+          event_type: 'status_changed',
+          data: {
+            from: task.status,
+            to: 'in_progress',
+          },
+          triggered_by: input.agent_id,
+        });
+      }
+      if (task.status === 'in_progress') {
+        this.eventEmitter.emit_task_event({
+          task_id: task.id,
+          event_type: 'task_reclaimed',
+          data: {
+            previous_assignee: task.assignee,
+            previous_lock_holder: currentLock?.agent_id ?? null,
+          },
+          triggered_by: input.agent_id,
+        });
+      }
 
       this.eventEmitter.emit_task_event({
         task_id: task.id,
@@ -574,12 +778,14 @@ export class TasksRuntime {
         status: 'already_completed';
         task_id: string;
         completed_at: string;
+        new_status?: 'review' | 'done';
       }
     | {
         status: 'conflict';
         task_id: string;
         completed_by: string;
         completed_at: string;
+        new_status?: 'review' | 'done';
       } {
     const task = this.taskManager.getTask(input.task_id);
     if (!task) {
@@ -1120,7 +1326,12 @@ export class TasksRuntime {
       throw new TasksError('gate_not_found', `quality gate not found: ${input.gate_id}`);
     }
 
-    this.accessControl.ensure_task_action('update_task', gate.task_id, input.evaluator_agent);
+    if (
+      !isSystemActor(input.evaluator_agent) &&
+      input.evaluator_agent !== gate.checker_agent
+    ) {
+      this.accessControl.ensure_task_action('update_task', gate.task_id, input.evaluator_agent);
+    }
 
     return this.qualityGateManager.create_gate_evaluation(
       {
@@ -1961,8 +2172,21 @@ export class TasksRuntime {
       goal_id: string;
       title: string;
       progress_percent: number;
-      tasks_summary: { total: number; done: number; in_progress: number; blocked: number };
-      quality_summary: { gates_total: number; gates_passed: number; pass_rate: number };
+      tasks_summary: {
+        total: number;
+        done: number;
+        in_progress: number;
+        blocked: number;
+        by_status: Record<string, number>;
+      };
+      quality_summary: {
+        gates_total: number;
+        gates_passed: number;
+        gates_failed: number;
+        gates_pending: number;
+        pass_rate: number;
+        aggregate_status: 'none' | 'pending' | 'failed' | 'passed';
+      };
       depth_metrics: { avg_effort_ms: number | null; child_task_ratio: number };
       wbs_version: number;
       ready_count: number;
@@ -1999,6 +2223,10 @@ export class TasksRuntime {
       const doneCount = tasks.filter((task) => task.status === 'done' || task.status === 'archived').length;
       const inProgressCount = tasks.filter((task) => task.status === 'in_progress').length;
       const blockedCount = tasks.filter((task) => task.status === 'blocked').length;
+      const byStatus = tasks.reduce<Record<string, number>>((acc, task) => {
+        acc[task.status] = (acc[task.status] ?? 0) + 1;
+        return acc;
+      }, {});
 
       const readyCount = tasks.filter(
         (task) => task.status === 'to_do' && this.dependencyResolver.are_dependencies_resolved(task.id),
@@ -2007,6 +2235,14 @@ export class TasksRuntime {
       const gates = this.list_quality_gates({ goal_id: goal.id });
       const passRate =
         gates.summary.total === 0 ? 0 : roundToTwo((gates.summary.passed / gates.summary.total) * 100);
+      const aggregateStatus: 'none' | 'pending' | 'failed' | 'passed' =
+        gates.summary.total === 0
+          ? 'none'
+          : gates.summary.failed > 0
+            ? 'failed'
+            : gates.summary.pending > 0
+              ? 'pending'
+              : 'passed';
 
       const avgEffortCandidates = tasks.filter((task) => task.actual_effort_ms !== null);
       const avgEffort =
@@ -2034,11 +2270,15 @@ export class TasksRuntime {
           done: doneCount,
           in_progress: inProgressCount,
           blocked: blockedCount,
+          by_status: byStatus,
         },
         quality_summary: {
           gates_total: gates.summary.total,
           gates_passed: gates.summary.passed,
+          gates_failed: gates.summary.failed,
+          gates_pending: gates.summary.pending,
           pass_rate: passRate,
+          aggregate_status: aggregateStatus,
         },
         depth_metrics: {
           avg_effort_ms: avgEffort,
@@ -2187,7 +2427,7 @@ export class TasksRuntime {
         continue;
       }
 
-      this.taskManager.updateTask(target.id, { status: 'to_do' }, triggered_by, triggered_by);
+      this.taskManager.updateTask(target.id, { status: 'to_do' }, triggered_by, 'system');
 
       this.eventEmitter.emit_task_event({
         task_id: target.id,
@@ -2234,7 +2474,21 @@ export class TasksRuntime {
       return false;
     }
 
-    this.taskManager.updateTask(goal.id, { status: 'review' }, triggered_by, triggered_by);
+    this.db
+      .prepare('UPDATE tasks SET status = ?, updated_at = ?, version = version + 1 WHERE id = ?')
+      .run('review', nowIso(), goal.id);
+
+    this.eventEmitter.emit_task_event({
+      task_id: goal.id,
+      event_type: 'status_changed',
+      data: {
+        from: goal.status,
+        to: 'review',
+        reason: 'all_children_done',
+      },
+      triggered_by,
+    });
+
     return true;
   }
 
