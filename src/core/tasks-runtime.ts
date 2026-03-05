@@ -18,9 +18,11 @@ import type {
   CreateScheduleInput,
   CreateSprintInput,
   CreateTaskInput,
+  DependencyType,
   ExpectedEffort,
   GateResult,
   ListSprintsInput,
+  ListTasksInput,
   Project,
   QualityGate,
   Schedule,
@@ -309,6 +311,42 @@ export class TasksRuntime {
     return {
       task_id,
       deleted: true,
+    };
+  }
+
+  public list_tasks(filters: ListTasksInput = {}): { tasks: Task[] } {
+    return { tasks: this.taskManager.listTasks(filters) };
+  }
+
+  public add_dependency(input: {
+    task_id: string;
+    depends_on: string;
+    type?: DependencyType;
+    agent_id: string;
+  }): { task_id: string; depends_on: string; type: DependencyType } {
+    this.dependencyResolver.add_dependency({
+      task_id: input.task_id,
+      depends_on: input.depends_on,
+      type: input.type,
+      triggered_by: input.agent_id,
+    });
+    return {
+      task_id: input.task_id,
+      depends_on: input.depends_on,
+      type: input.type ?? 'finish_to_start',
+    };
+  }
+
+  public remove_dependency(input: {
+    task_id: string;
+    depends_on: string;
+    agent_id: string;
+  }): { task_id: string; depends_on: string; removed: true } {
+    this.dependencyResolver.remove_dependency(input.task_id, input.depends_on, input.agent_id);
+    return {
+      task_id: input.task_id,
+      depends_on: input.depends_on,
+      removed: true,
     };
   }
 

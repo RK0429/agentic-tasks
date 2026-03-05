@@ -7,3 +7,4 @@ coverage/
 *.sqlite
 *.sqlite3
 .env
+*.tgz

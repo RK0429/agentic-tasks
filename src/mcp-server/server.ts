@@ -313,6 +313,61 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
 
   registerTool(
     server,
+    'list_tasks',
+    'List tasks with optional filters (status, project, goal, parent, type, assignee).',
+    {
+      status: z
+        .enum(['backlog', 'to_do', 'in_progress', 'review', 'done', 'blocked', 'escalated', 'archived'])
+        .optional(),
+      project_id: z.string().optional(),
+      goal_id: z.string().optional(),
+      parent_task_id: z.string().optional(),
+      task_type: z.enum(['goal', 'task']).optional(),
+      assignee: z.string().optional(),
+      limit: z.number().int().min(1).max(1000).default(100),
+      offset: z.number().int().min(0).default(0),
+    },
+    (input) => runtime.list_tasks(input as never),
+  );
+
+  registerTool(
+    server,
+    'add_dependency',
+    'Add a dependency between two sibling tasks (same parent). Rejects cycles.',
+    {
+      task_id: z.string(),
+      depends_on: z.string(),
+      type: z.enum(['finish_to_start', 'start_to_start']).optional(),
+      agent_id: z.string(),
+    },
+    (input) =>
+      runtime.add_dependency({
+        task_id: String(input.task_id),
+        depends_on: String(input.depends_on),
+        type: input.type as 'finish_to_start' | 'start_to_start' | undefined,
+        agent_id: String(input.agent_id),
+      }),
+  );
+
+  registerTool(
+    server,
+    'remove_dependency',
+    'Remove a dependency between two tasks.',
+    {
+      task_id: z.string(),
+      depends_on: z.string(),
+      agent_id: z.string(),
+    },
+    (input) =>
+      runtime.remove_dependency({
+        task_id: String(input.task_id),
+        depends_on: String(input.depends_on),
+        agent_id: String(input.agent_id),
+      }),
+  );
+
+  registerTool(
+    server,
     'assign_task',
     'Assign task with WIP limit validation.',
     {
