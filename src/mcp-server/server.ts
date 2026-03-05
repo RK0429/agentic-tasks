@@ -113,6 +113,7 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
       priority: z.enum(['critical', 'high', 'medium', 'low']).optional(),
       task_type: z.enum(['goal', 'task']).optional(),
       parent_task_id: z.string().nullable().optional(),
+      goal_id: z.string().optional(),
       project_id: z.string().optional(),
       sprint_id: z.string().nullable().optional(),
       status: z
@@ -160,6 +161,7 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
             priority: input.priority as 'critical' | 'high' | 'medium' | 'low' | undefined,
             task_type: input.task_type as 'goal' | 'task' | undefined,
             parent_task_id: (input.parent_task_id as string | null | undefined) ?? undefined,
+            goal_id: input.goal_id as string | undefined,
             project_id: input.project_id as string | undefined,
             sprint_id: (input.sprint_id as string | null | undefined) ?? undefined,
             status: input.status as
@@ -321,6 +323,7 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
         .optional(),
       project_id: z.string().optional(),
       goal_id: z.string().optional(),
+      depth: z.number().int().min(0).optional(),
       parent_task_id: z.string().optional(),
       task_type: z.enum(['goal', 'task']).optional(),
       assignee: z.string().optional(),
@@ -426,10 +429,15 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
     'next_task',
     'Get next executable task by priority and dependency resolution with WIP check.',
     {
-      project_id: z.string(),
+      project_id: z.string().optional(),
       assignee: z.string().optional(),
     },
-    (input) => ({ task: runtime.next_task({ project_id: String(input.project_id), assignee: input.assignee as string | undefined }) }),
+    (input) => ({
+      task: runtime.next_task({
+        project_id: input.project_id as string | undefined,
+        assignee: input.assignee as string | undefined,
+      }),
+    }),
   );
 
   registerTool(
@@ -440,6 +448,48 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
       project_id: z.string(),
     },
     (input) => runtime.dashboard({ project_id: String(input.project_id) }),
+  );
+
+  registerTool(
+    server,
+    'get_events',
+    'Get task and quality-gate events with optional filters.',
+    {
+      task_id: z.string().optional(),
+      project_id: z.string().optional(),
+      event_types: z.array(z.string()).optional(),
+      since: z.string().optional(),
+      limit: z.number().int().min(1).max(500).default(50),
+    },
+    (input) =>
+      runtime.get_events({
+        task_id: input.task_id as string | undefined,
+        project_id: input.project_id as string | undefined,
+        event_types: input.event_types as string[] | undefined,
+        since: input.since as string | undefined,
+        limit: input.limit as number | undefined,
+      }),
+  );
+
+  registerTool(
+    server,
+    'poll_events',
+    'Poll events after cursor with optional long-poll timeout.',
+    {
+      cursor: z.string().optional(),
+      event_types: z.array(z.string()).optional(),
+      project_id: z.string().optional(),
+      timeout_ms: z.number().int().min(0).max(60_000).default(0),
+      limit: z.number().int().min(1).max(500).default(50),
+    },
+    (input) =>
+      runtime.poll_events({
+        cursor: input.cursor as string | undefined,
+        event_types: input.event_types as string[] | undefined,
+        project_id: input.project_id as string | undefined,
+        timeout_ms: input.timeout_ms as number | undefined,
+        limit: input.limit as number | undefined,
+      }),
   );
 
   registerTool(
@@ -675,6 +725,40 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
     'Run due schedules immediately and create tasks.',
     {},
     () => runtime.run_scheduler(),
+  );
+
+  registerTool(
+    server,
+    'import_mdtm',
+    'Import MDTM markdown tasks into SQLite.',
+    {
+      source_dir: z.string(),
+      default_project_id: z.string().optional(),
+      project_id: z.string().optional(),
+      clear_existing: z.boolean().default(false),
+    },
+    (input) =>
+      runtime.import_mdtm({
+        source_dir: String(input.source_dir),
+        default_project_id: input.default_project_id as string | undefined,
+        project_id: input.project_id as string | undefined,
+        clear_existing: input.clear_existing as boolean | undefined,
+      }),
+  );
+
+  registerTool(
+    server,
+    'export_mdtm',
+    'Export SQLite tasks to MDTM markdown format.',
+    {
+      target_dir: z.string(),
+      project_id: z.string().optional(),
+    },
+    (input) =>
+      runtime.export_mdtm({
+        target_dir: String(input.target_dir),
+        project_id: input.project_id as string | undefined,
+      }),
   );
 
   registerTool(

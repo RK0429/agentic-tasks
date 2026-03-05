@@ -147,6 +147,7 @@ export interface CreateTaskInput {
   priority?: TaskPriority;
   task_type?: TaskType;
   parent_task_id?: string | null;
+  goal_id?: string;
   project_id?: string;
   sprint_id?: string | null;
   status?: TaskStatus;
@@ -179,6 +180,7 @@ export interface ListTasksInput {
   status?: TaskStatus;
   project_id?: string;
   goal_id?: string;
+  depth?: number;
   parent_task_id?: string;
   task_type?: TaskType;
   assignee?: string;

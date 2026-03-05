@@ -16,7 +16,14 @@ import {
 import { openDatabase } from '../db/index.js';
 import { startMcpServer } from '../mcp-server/index.js';
 import { exportSqliteToMdtm, importMdtmToSqlite, verifyMigration } from '../migration/index.js';
-import type { TaskStatus } from '../types/index.js';
+import type {
+  DeliveryPhase,
+  DependencyType,
+  ExpectedEffort,
+  TaskPriority,
+  TaskStatus,
+  TaskType,
+} from '../types/index.js';
 
 const DEFAULT_DB_PATH = path.resolve(process.cwd(), '.tasks/agentic-tasks.db');
 
@@ -25,6 +32,56 @@ interface Context {
   taskManager: TaskManager;
   dependencyResolver: DependencyResolver;
   runtime: TasksRuntime;
+}
+
+interface TaskCreateCommandOptions {
+  title: string;
+  description?: string;
+  priority?: TaskPriority;
+  taskType?: TaskType;
+  parentTaskId?: string;
+  projectId?: string;
+  sprintId?: string;
+  phase?: DeliveryPhase;
+  sourceRef?: string;
+  expectedEffort?: ExpectedEffort;
+  assignee?: string;
+  acceptanceCriteria?: string;
+  metadata?: string;
+  createdBy?: string;
+  agentId?: string;
+}
+
+interface TaskUpdateCommandOptions {
+  title?: string;
+  description?: string;
+  status?: TaskStatus;
+  priority?: TaskPriority;
+  sprintId?: string;
+  assignee?: string;
+  acceptanceCriteria?: string;
+  metadata?: string;
+  phase?: DeliveryPhase;
+  sourceRef?: string;
+  expectedEffort?: ExpectedEffort;
+  actualEffortMs?: string;
+}
+
+interface TaskListCommandOptions {
+  status?: TaskStatus;
+  projectId?: string;
+  goalId?: string;
+  parentTaskId?: string;
+  taskType?: TaskType;
+  assignee?: string;
+  limit: string;
+  offset: string;
+}
+
+interface DependencyAddCommandOptions {
+  taskId: string;
+  dependsOn: string;
+  type?: DependencyType;
 }
 
 function parseJson(value: string | undefined, fieldName: string): unknown {
@@ -69,6 +126,181 @@ function createContext(db_path: string): Context {
   };
 }
 
+function resolveDbPath(command: Command): string {
+  let current: Command | undefined = command;
+  while (current?.parent) {
+    current = current.parent;
+  }
+  return current?.opts().db ?? DEFAULT_DB_PATH;
+}
+
+function configureTaskCreateCommand(command: Command): Command {
+  return command
+    .requiredOption('--title <title>', 'title')
+    .option('--description <description>', 'description')
+    .option('--priority <priority>', 'priority: critical|high|medium|low', 'medium')
+    .option('--task-type <task_type>', 'task_type: goal|task', 'task')
+    .option('--parent-task-id <parent_task_id>', 'parent_task_id')
+    .option('--project-id <project_id>', 'project_id')
+    .option('--sprint-id <sprint_id>', 'sprint_id')
+    .option('--phase <phase>', 'phase')
+    .option('--source-ref <source_ref>', 'source_ref')
+    .option('--expected-effort <expected_effort>', 'expected_effort: XS|S|M|L|XL')
+    .option('--assignee <assignee>', 'assignee')
+    .option('--acceptance-criteria <json>', 'acceptance_criteria JSON array')
+    .option('--metadata <json>', 'metadata JSON object')
+    .option('--created-by <created_by>', 'created_by');
+}
+
+function configureTaskUpdateCommand(command: Command): Command {
+  return command
+    .option('--title <title>', 'title')
+    .option('--description <description>', 'description')
+    .option('--status <status>', 'status')
+    .option('--priority <priority>', 'priority')
+    .option('--sprint-id <sprint_id>', 'sprint_id')
+    .option('--assignee <assignee>', 'assignee')
+    .option('--acceptance-criteria <json>', 'acceptance_criteria JSON array')
+    .option('--metadata <json>', 'metadata JSON object')
+    .option('--phase <phase>', 'phase')
+    .option('--source-ref <source_ref>', 'source_ref')
+    .option('--expected-effort <expected_effort>', 'expected_effort')
+    .option('--actual-effort-ms <actual_effort_ms>', 'actual_effort_ms');
+}
+
+function configureTaskListCommand(command: Command): Command {
+  return command
+    .option('--status <status>', 'status')
+    .option('--project-id <project_id>', 'project_id')
+    .option('--goal-id <goal_id>', 'goal_id')
+    .option('--parent-task-id <parent_task_id>', 'parent_task_id')
+    .option('--task-type <task_type>', 'task_type')
+    .option('--assignee <assignee>', 'assignee')
+    .option('--limit <limit>', 'limit', '100')
+    .option('--offset <offset>', 'offset', '0');
+}
+
+function runTaskCreate(db_path: string, options: TaskCreateCommandOptions): void {
+  const context = createContext(db_path);
+
+  try {
+    const task = context.taskManager.createTask({
+      title: options.title,
+      description: options.description,
+      priority: options.priority,
+      task_type: options.taskType,
+      parent_task_id: options.parentTaskId,
+      project_id: options.projectId,
+      sprint_id: options.sprintId,
+      phase: options.phase,
+      source_ref: options.sourceRef,
+      expected_effort: options.expectedEffort,
+      assignee: options.assignee,
+      acceptance_criteria: parseJson(options.acceptanceCriteria, 'acceptance_criteria') as never,
+      metadata: parseJson(options.metadata, 'metadata') as never,
+      created_by: options.createdBy ?? options.agentId,
+    });
+
+    printResult({ success: true, task });
+  } finally {
+    context.close();
+  }
+}
+
+function runTaskGet(db_path: string, id: string): void {
+  const context = createContext(db_path);
+
+  try {
+    const task = context.taskManager.getTask(id);
+    if (!task) {
+      throw new TasksError('task_not_found', `task not found: ${id}`);
+    }
+    printResult({ success: true, task });
+  } finally {
+    context.close();
+  }
+}
+
+function runTaskUpdate(db_path: string, id: string, options: TaskUpdateCommandOptions): void {
+  const context = createContext(db_path);
+
+  try {
+    const updates = {
+      title: options.title,
+      description: options.description,
+      status: options.status as TaskStatus | undefined,
+      priority: options.priority,
+      sprint_id: options.sprintId,
+      assignee: options.assignee,
+      acceptance_criteria: parseJson(options.acceptanceCriteria, 'acceptance_criteria') as never,
+      metadata: parseJson(options.metadata, 'metadata') as never,
+      phase: options.phase,
+      source_ref: options.sourceRef,
+      expected_effort: options.expectedEffort,
+      actual_effort_ms: options.actualEffortMs ? Number(options.actualEffortMs) : undefined,
+    };
+
+    const task = context.taskManager.updateTask(id, updates);
+    printResult({ success: true, task });
+  } finally {
+    context.close();
+  }
+}
+
+function runTaskList(db_path: string, options: TaskListCommandOptions): void {
+  const context = createContext(db_path);
+
+  try {
+    const tasks = context.taskManager.listTasks({
+      status: options.status,
+      project_id: options.projectId,
+      goal_id: options.goalId,
+      parent_task_id: options.parentTaskId,
+      task_type: options.taskType,
+      assignee: options.assignee,
+      limit: Number(options.limit),
+      offset: Number(options.offset),
+    });
+
+    printResult({ success: true, tasks });
+  } finally {
+    context.close();
+  }
+}
+
+function runDependencyAdd(db_path: string, options: DependencyAddCommandOptions): void {
+  const context = createContext(db_path);
+
+  try {
+    context.dependencyResolver.add_dependency({
+      task_id: options.taskId,
+      depends_on: options.dependsOn,
+      type: options.type,
+    });
+    printResult({
+      success: true,
+      dependency: {
+        task_id: options.taskId,
+        depends_on: options.dependsOn,
+        type: options.type ?? 'finish_to_start',
+      },
+    });
+  } finally {
+    context.close();
+  }
+}
+
+function runDependencyList(db_path: string, id: string): void {
+  const context = createContext(db_path);
+
+  try {
+    const dependencies = context.dependencyResolver.list_dependencies(id);
+    printResult({ success: true, task_id: id, dependencies });
+  } finally {
+    context.close();
+  }
+}
+
 function printResult(payload: unknown): void {
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
@@ -104,7 +336,19 @@ async function main(): Promise<void> {
     .name('tasks')
     .description('agentic-tasks CLI')
     .option('--db <path>', 'SQLite database path', DEFAULT_DB_PATH)
-    .showHelpAfterError();
+    .showHelpAfterError()
+    .addHelpText(
+      'after',
+      `
+Examples:
+  $ agentic-tasks init
+  $ agentic-tasks project create --name 'My Project'
+  $ agentic-tasks goal create --title 'Goal 1' --project-id PROJ-001 --agent-id agent1
+  $ agentic-tasks task create --title 'Task 1' --project-id PROJ-001 --agent-id agent1
+  $ agentic-tasks task list --project-id PROJ-001
+  $ agentic-tasks dashboard --project-id PROJ-001
+`,
+    );
 
   program
     .command('init')
@@ -116,113 +360,25 @@ async function main(): Promise<void> {
       printResult({ success: true, db_path });
     });
 
-  program
-    .command('create')
-    .description('タスク作成')
-    .requiredOption('--title <title>', 'title')
-    .option('--description <description>', 'description')
-    .option('--priority <priority>', 'priority: critical|high|medium|low', 'medium')
-    .option('--task-type <task_type>', 'task_type: goal|task', 'task')
-    .option('--parent-task-id <parent_task_id>', 'parent_task_id')
-    .option('--project-id <project_id>', 'project_id')
-    .option('--sprint-id <sprint_id>', 'sprint_id')
-    .option('--phase <phase>', 'phase')
-    .option('--source-ref <source_ref>', 'source_ref')
-    .option('--expected-effort <expected_effort>', 'expected_effort: XS|S|M|L|XL')
-    .option('--assignee <assignee>', 'assignee')
-    .option('--acceptance-criteria <json>', 'acceptance_criteria JSON array')
-    .option('--metadata <json>', 'metadata JSON object')
-    .option('--created-by <created_by>', 'created_by')
-    .action(function action(options) {
-      const db_path = this.parent?.opts().db ?? DEFAULT_DB_PATH;
-      const context = createContext(db_path);
-
-      try {
-        const task = context.taskManager.createTask({
-          title: options.title,
-          description: options.description,
-          priority: options.priority,
-          task_type: options.taskType,
-          parent_task_id: options.parentTaskId,
-          project_id: options.projectId,
-          sprint_id: options.sprintId,
-          phase: options.phase,
-          source_ref: options.sourceRef,
-          expected_effort: options.expectedEffort,
-          assignee: options.assignee,
-          acceptance_criteria: parseJson(
-            options.acceptanceCriteria,
-            'acceptance_criteria',
-          ) as never,
-          metadata: parseJson(options.metadata, 'metadata') as never,
-          created_by: options.createdBy,
-        });
-
-        printResult({ success: true, task });
-      } finally {
-        context.close();
-      }
-    });
+  configureTaskCreateCommand(program.command('create').description('タスク作成')).action(function action(options) {
+    const db_path = resolveDbPath(this);
+    runTaskCreate(db_path, options as TaskCreateCommandOptions);
+  });
 
   program
     .command('get <id>')
     .description('タスク取得')
     .action(function action(id: string) {
-      const db_path = this.parent?.opts().db ?? DEFAULT_DB_PATH;
-      const context = createContext(db_path);
-
-      try {
-        const task = context.taskManager.getTask(id);
-        if (!task) {
-          throw new TasksError('task_not_found', `task not found: ${id}`);
-        }
-        printResult({ success: true, task });
-      } finally {
-        context.close();
-      }
+      const db_path = resolveDbPath(this);
+      runTaskGet(db_path, id);
     });
 
-  program
-    .command('update <id>')
-    .description('タスク更新')
-    .option('--title <title>', 'title')
-    .option('--description <description>', 'description')
-    .option('--status <status>', 'status')
-    .option('--priority <priority>', 'priority')
-    .option('--sprint-id <sprint_id>', 'sprint_id')
-    .option('--assignee <assignee>', 'assignee')
-    .option('--acceptance-criteria <json>', 'acceptance_criteria JSON array')
-    .option('--metadata <json>', 'metadata JSON object')
-    .option('--phase <phase>', 'phase')
-    .option('--source-ref <source_ref>', 'source_ref')
-    .option('--expected-effort <expected_effort>', 'expected_effort')
-    .option('--actual-effort-ms <actual_effort_ms>', 'actual_effort_ms')
-    .action(function action(id: string, options) {
-      const db_path = this.parent?.opts().db ?? DEFAULT_DB_PATH;
-      const context = createContext(db_path);
-
-      try {
-        const updates = {
-          title: options.title,
-          description: options.description,
-          status: options.status as TaskStatus | undefined,
-          priority: options.priority,
-          sprint_id: options.sprintId,
-          assignee: options.assignee,
-          acceptance_criteria: parseJson(options.acceptanceCriteria, 'acceptance_criteria') as never,
-          metadata: parseJson(options.metadata, 'metadata') as never,
-          phase: options.phase,
-          source_ref: options.sourceRef,
-          expected_effort: options.expectedEffort,
-          actual_effort_ms: options.actualEffortMs ? Number(options.actualEffortMs) : undefined,
-        };
-
-        const task = context.taskManager.updateTask(id, updates);
-        printResult({ success: true, task });
-      } finally {
-        context.close();
-      }
-    });
+  configureTaskUpdateCommand(program.command('update <id>').description('タスク更新')).action(
+    function action(id: string, options) {
+      const db_path = resolveDbPath(this);
+      runTaskUpdate(db_path, id, options as TaskUpdateCommandOptions);
+    },
+  );
 
   program
     .command('delete <id>')
@@ -239,34 +395,80 @@ async function main(): Promise<void> {
       }
     });
 
-  program
-    .command('list')
-    .description('タスク一覧')
-    .option('--status <status>', 'status')
-    .option('--project-id <project_id>', 'project_id')
-    .option('--goal-id <goal_id>', 'goal_id')
-    .option('--parent-task-id <parent_task_id>', 'parent_task_id')
-    .option('--task-type <task_type>', 'task_type')
-    .option('--assignee <assignee>', 'assignee')
-    .option('--limit <limit>', 'limit', '100')
-    .option('--offset <offset>', 'offset', '0')
+  configureTaskListCommand(program.command('list').description('タスク一覧')).action(function action(options) {
+    const db_path = resolveDbPath(this);
+    runTaskList(db_path, options as TaskListCommandOptions);
+  });
+
+  const task = program.command('task').description('タスク操作');
+
+  configureTaskCreateCommand(task.command('create').description('タスク作成（エイリアス）'))
+    .option('--agent-id <agent_id>', 'agent_id')
     .action(function action(options) {
-      const db_path = this.parent?.opts().db ?? DEFAULT_DB_PATH;
+      const db_path = resolveDbPath(this);
+      runTaskCreate(db_path, {
+        ...(options as TaskCreateCommandOptions),
+        taskType: (options as TaskCreateCommandOptions).taskType ?? 'task',
+      });
+    });
+
+  configureTaskListCommand(task.command('list').description('タスク一覧（エイリアス）')).action(
+    function action(options) {
+      const db_path = resolveDbPath(this);
+      runTaskList(db_path, options as TaskListCommandOptions);
+    },
+  );
+
+  configureTaskUpdateCommand(task.command('update <id>').description('タスク更新（エイリアス）')).action(
+    function action(id: string, options) {
+      const db_path = resolveDbPath(this);
+      runTaskUpdate(db_path, id, options as TaskUpdateCommandOptions);
+    },
+  );
+
+  task
+    .command('get <id>')
+    .description('タスク取得（エイリアス）')
+    .action(function action(id: string) {
+      const db_path = resolveDbPath(this);
+      runTaskGet(db_path, id);
+    });
+
+  const goal = program.command('goal').description('ゴール操作');
+
+  configureTaskCreateCommand(goal.command('create').description('ゴール作成（エイリアス）'))
+    .option('--agent-id <agent_id>', 'agent_id')
+    .action(function action(options) {
+      const db_path = resolveDbPath(this);
+      runTaskCreate(db_path, {
+        ...(options as TaskCreateCommandOptions),
+        taskType: 'goal',
+      });
+    });
+
+  configureTaskListCommand(goal.command('list').description('ゴール一覧（エイリアス）')).action(
+    function action(options) {
+      const db_path = resolveDbPath(this);
+      runTaskList(db_path, {
+        ...(options as TaskListCommandOptions),
+        taskType: 'goal',
+      });
+    },
+  );
+
+  program
+    .command('dashboard')
+    .description('プロジェクトダッシュボード取得')
+    .requiredOption('--project-id <project_id>', 'project_id')
+    .action(function action(options) {
+      const db_path = resolveDbPath(this);
       const context = createContext(db_path);
 
       try {
-        const tasks = context.taskManager.listTasks({
-          status: options.status,
+        const result = context.runtime.dashboard({
           project_id: options.projectId,
-          goal_id: options.goalId,
-          parent_task_id: options.parentTaskId,
-          task_type: options.taskType,
-          assignee: options.assignee,
-          limit: Number(options.limit),
-          offset: Number(options.offset),
         });
-
-        printResult({ success: true, tasks });
+        printResult({ success: true, ...result });
       } finally {
         context.close();
       }
@@ -568,38 +770,50 @@ async function main(): Promise<void> {
     .requiredOption('--depends-on <depends_on>', 'depends_on')
     .option('--type <type>', 'type: finish_to_start|start_to_start', 'finish_to_start')
     .action(function action(options) {
-      const db_path = this.parent?.parent?.opts().db ?? DEFAULT_DB_PATH;
-      const context = createContext(db_path);
-
-      try {
-        context.dependencyResolver.add_dependency({
-          task_id: options.taskId,
-          depends_on: options.dependsOn,
-          type: options.type,
-        });
-        printResult({
-          success: true,
-          dependency: {
-            task_id: options.taskId,
-            depends_on: options.dependsOn,
-            type: options.type,
-          },
-        });
-      } finally {
-        context.close();
-      }
+      const db_path = resolveDbPath(this);
+      runDependencyAdd(db_path, options as DependencyAddCommandOptions);
     });
 
   deps
     .command('list <id>')
     .description('依存関係一覧')
     .action(function action(id: string) {
-      const db_path = this.parent?.parent?.opts().db ?? DEFAULT_DB_PATH;
+      const db_path = resolveDbPath(this);
+      runDependencyList(db_path, id);
+    });
+
+  deps
+    .command('resolve <taskId>')
+    .description('依存関係の解決状態を確認')
+    .action(function action(taskId: string) {
+      const db_path = resolveDbPath(this);
       const context = createContext(db_path);
 
       try {
-        const dependencies = context.dependencyResolver.list_dependencies(id);
-        printResult({ success: true, task_id: id, dependencies });
+        const result = context.runtime.resolve_dependencies(taskId);
+        printResult({ success: true, ...result });
+      } finally {
+        context.close();
+      }
+    });
+
+  deps
+    .command('remove')
+    .description('依存関係削除')
+    .requiredOption('--task-id <task_id>', 'task_id')
+    .requiredOption('--depends-on <depends_on>', 'depends_on')
+    .option('--agent-id <agent_id>', 'agent_id', 'system')
+    .action(function action(options) {
+      const db_path = resolveDbPath(this);
+      const context = createContext(db_path);
+
+      try {
+        const result = context.runtime.remove_dependency({
+          task_id: options.taskId,
+          depends_on: options.dependsOn,
+          agent_id: options.agentId,
+        });
+        printResult({ success: true, ...result });
       } finally {
         context.close();
       }

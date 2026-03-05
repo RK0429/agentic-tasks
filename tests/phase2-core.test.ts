@@ -89,6 +89,52 @@ describe('Phase 2 core features', () => {
     expect(latestEvent?.event_type).toBe('wip_limit_exceeded');
   });
 
+  it('allows next_task without project_id and picks from all projects', () => {
+    context = createTestContext();
+
+    const project2 = context.runtime.create_project({
+      name: 'Project 2',
+      description: 'Secondary',
+      wip_limit: 5,
+    }).project;
+
+    const goal1 = context.runtime.create_goal({
+      title: 'Goal 1',
+      project_id: 'PROJ-001',
+      agent_id: 'owner',
+    });
+    const goal2 = context.runtime.create_goal({
+      title: 'Goal 2',
+      project_id: project2.id,
+      agent_id: 'owner',
+    });
+
+    const low = context.runtime.create_task(
+      {
+        title: 'Low Priority',
+        task_type: 'task',
+        parent_task_id: goal1.goal_id,
+        project_id: 'PROJ-001',
+        priority: 'low',
+      },
+      'owner',
+    );
+    const high = context.runtime.create_task(
+      {
+        title: 'High Priority',
+        task_type: 'task',
+        parent_task_id: goal2.goal_id,
+        project_id: project2.id,
+        priority: 'high',
+      },
+      'owner',
+    );
+
+    const next = context.runtime.next_task({});
+    expect(next?.id).toBe(high.id);
+    expect(next?.id).not.toBe(low.id);
+  });
+
   it('computes goal progress rollup with weighted completion and effort_to_ms', () => {
     context = createTestContext();
 

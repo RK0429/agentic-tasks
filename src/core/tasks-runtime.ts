@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import path from 'node:path';
 
 import { AccessControl } from './access-control.js';
 import { DependencyResolver } from './dependency-resolver.js';
@@ -12,6 +13,12 @@ import { QualityGateManager } from './quality-gate-manager.js';
 import { Scheduler } from './scheduler.js';
 import { SprintManager } from './sprint-manager.js';
 import { TaskManager } from './task-manager.js';
+import {
+  exportSqliteToMdtm,
+  importMdtmToSqlite,
+  type ExportMdtmResult,
+  type ImportMdtmResult,
+} from '../migration/index.js';
 import type {
   CreateProjectInput,
   CreateQualityGateInput,
@@ -28,6 +35,7 @@ import type {
   Schedule,
   Sprint,
   Task,
+  TaskEvent,
   TaskStatus,
   UpdateProjectInput,
   UpdateScheduleInput,
@@ -542,8 +550,133 @@ export class TasksRuntime {
     };
   }
 
-  public next_task(input: { project_id: string; assignee?: string }): Task | null {
+  public next_task(input: { project_id?: string; assignee?: string }): Task | null {
     return this.queueManager.next_task(input);
+  }
+
+  public get_events(input: {
+    task_id?: string;
+    project_id?: string;
+    event_types?: string[];
+    since?: string;
+    limit?: number;
+  } = {}): { events: TaskEvent[]; has_more: boolean } {
+    const where: string[] = [];
+    const values: Array<string | number> = [];
+
+    if (input.task_id) {
+      where.push('e.task_id = ?');
+      values.push(input.task_id);
+    }
+    if (input.project_id) {
+      where.push('t.project_id = ?');
+      values.push(input.project_id);
+    }
+    if (input.event_types && input.event_types.length > 0) {
+      where.push(`e.event_type IN (${input.event_types.map(() => '?').join(', ')})`);
+      values.push(...input.event_types);
+    }
+    if (input.since) {
+      const since = Date.parse(input.since);
+      if (Number.isNaN(since)) {
+        throw new TasksError('invalid_since', 'since must be valid ISO 8601 datetime');
+      }
+      where.push('e.created_at >= ?');
+      values.push(new Date(since).toISOString());
+    }
+
+    const limit = this.normalizeLimit(input.limit, 50);
+    const joins = input.project_id ? 'JOIN tasks t ON t.id = e.task_id' : '';
+    const sql = [
+      'SELECT e.id, e.task_id, e.event_type, e.data, e.triggered_by, e.created_at',
+      'FROM task_events e',
+      joins,
+      where.length > 0 ? `WHERE ${where.join(' AND ')}` : '',
+      'ORDER BY e.id DESC',
+      'LIMIT ?',
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+    const rows = this.db.prepare(sql).all(...values, limit + 1) as TaskEventRow[];
+    const has_more = rows.length > limit;
+    const events = rows.slice(0, limit).map((row) => this.toTaskEvent(row));
+    return {
+      events,
+      has_more,
+    };
+  }
+
+  public async poll_events(input: {
+    cursor?: string;
+    event_types?: string[];
+    project_id?: string;
+    timeout_ms?: number;
+    limit?: number;
+  } = {}): Promise<{ events: TaskEvent[]; next_cursor: string }> {
+    const cursor = this.parseCursor(input.cursor);
+    const timeout_ms = Math.max(0, input.timeout_ms ?? 0);
+    const limit = this.normalizeLimit(input.limit, 50);
+    const deadline = Date.now() + timeout_ms;
+
+    for (;;) {
+      const rows = this.selectEventsAfterCursor(cursor, {
+        event_types: input.event_types,
+        project_id: input.project_id,
+        limit,
+      });
+
+      if (rows.length > 0 || timeout_ms === 0 || Date.now() >= deadline) {
+        const events = rows.map((row) => this.toTaskEvent(row));
+        return {
+          events,
+          next_cursor: events.length > 0 ? String(events[events.length - 1]?.id ?? cursor) : String(cursor),
+        };
+      }
+
+      const wait_ms = Math.min(250, Math.max(0, deadline - Date.now()));
+      if (wait_ms <= 0) {
+        return {
+          events: [],
+          next_cursor: String(cursor),
+        };
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, wait_ms));
+    }
+  }
+
+  public import_mdtm(input: {
+    source_dir: string;
+    default_project_id?: string;
+    project_id?: string;
+    clear_existing?: boolean;
+  }): ImportMdtmResult {
+    if (!input.source_dir || input.source_dir.trim() === '') {
+      throw new TasksError('invalid_source_dir', 'source_dir is required');
+    }
+
+    return importMdtmToSqlite({
+      source_dir: path.resolve(input.source_dir),
+      db_path: this.resolveDatabasePath(),
+      default_project_id: input.default_project_id ?? input.project_id,
+      clear_existing: input.clear_existing ?? false,
+    });
+  }
+
+  public export_mdtm(input: {
+    target_dir: string;
+    project_id?: string;
+  }): ExportMdtmResult {
+    if (!input.target_dir || input.target_dir.trim() === '') {
+      throw new TasksError('invalid_target_dir', 'target_dir is required');
+    }
+
+    return exportSqliteToMdtm({
+      db_path: this.resolveDatabasePath(),
+      target_dir: path.resolve(input.target_dir),
+      project_id: input.project_id,
+    });
   }
 
   public assign_task(input: {
@@ -2371,6 +2504,96 @@ export class TasksRuntime {
           }
         : null,
     };
+  }
+
+  private normalizeLimit(value: number | undefined, fallback: number): number {
+    if (value === undefined) {
+      return fallback;
+    }
+
+    if (!Number.isFinite(value)) {
+      return fallback;
+    }
+
+    return Math.min(500, Math.max(1, Math.trunc(value)));
+  }
+
+  private parseCursor(cursor: string | undefined): number {
+    if (!cursor) {
+      return 0;
+    }
+
+    if (!/^\d+$/.test(cursor)) {
+      throw new TasksError('invalid_cursor', 'cursor must be a non-negative integer string');
+    }
+
+    const parsed = Number.parseInt(cursor, 10);
+    if (!Number.isSafeInteger(parsed)) {
+      throw new TasksError('invalid_cursor', 'cursor is too large');
+    }
+
+    return parsed;
+  }
+
+  private selectEventsAfterCursor(
+    cursor: number,
+    input: {
+      event_types?: string[];
+      project_id?: string;
+      limit: number;
+    },
+  ): TaskEventRow[] {
+    const where: string[] = ['e.id > ?'];
+    const values: Array<string | number> = [cursor];
+
+    if (input.project_id) {
+      where.push('t.project_id = ?');
+      values.push(input.project_id);
+    }
+    if (input.event_types && input.event_types.length > 0) {
+      where.push(`e.event_type IN (${input.event_types.map(() => '?').join(', ')})`);
+      values.push(...input.event_types);
+    }
+
+    const joins = input.project_id ? 'JOIN tasks t ON t.id = e.task_id' : '';
+    const sql = [
+      'SELECT e.id, e.task_id, e.event_type, e.data, e.triggered_by, e.created_at',
+      'FROM task_events e',
+      joins,
+      `WHERE ${where.join(' AND ')}`,
+      'ORDER BY e.id ASC',
+      'LIMIT ?',
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+    return this.db.prepare(sql).all(...values, input.limit) as TaskEventRow[];
+  }
+
+  private toTaskEvent(row: TaskEventRow): TaskEvent {
+    return {
+      id: row.id,
+      task_id: row.task_id,
+      event_type: row.event_type,
+      data: parseJson(row.data, null as Record<string, unknown> | null),
+      triggered_by: row.triggered_by,
+      created_at: row.created_at,
+    };
+  }
+
+  private resolveDatabasePath(): string {
+    const rows = this.db
+      .prepare('PRAGMA database_list')
+      .all() as Array<{ name: string; file: string }>;
+    const main = rows.find((row) => row.name === 'main');
+    if (!main || !main.file) {
+      throw new TasksError(
+        'db_path_unavailable',
+        'database path is unavailable for migration tools',
+      );
+    }
+
+    return main.file;
   }
 
   private ensureChildTasksDone(task_id: string): void {

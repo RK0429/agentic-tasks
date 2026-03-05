@@ -156,6 +156,7 @@ export class TaskManager {
     const hierarchy = this.resolveHierarchy(
       task_type,
       input.parent_task_id ?? null,
+      input.goal_id ?? null,
       input.project_id ?? null,
     );
 
@@ -248,6 +249,10 @@ export class TaskManager {
     if (filters.goal_id) {
       where.push('goal_id = ?');
       values.push(filters.goal_id);
+    }
+    if (filters.depth !== undefined) {
+      where.push('depth <= ?');
+      values.push(filters.depth);
     }
     if (filters.parent_task_id) {
       where.push('parent_task_id = ?');
@@ -611,6 +616,7 @@ export class TaskManager {
   private resolveHierarchy(
     task_type: TaskType,
     parent_task_id: string | null,
+    requested_goal_id: string | null,
     project_id: string | null,
   ): {
     parent_task_id: string | null;
@@ -621,6 +627,9 @@ export class TaskManager {
     if (task_type === 'goal') {
       if (parent_task_id !== null) {
         throw new TasksError('invalid_parent', 'goal must not have parent_task_id');
+      }
+      if (requested_goal_id !== null) {
+        throw new TasksError('invalid_goal', 'goal must not have goal_id');
       }
 
       const resolvedProject = this.resolveProjectId(project_id);
@@ -663,6 +672,12 @@ export class TaskManager {
     const goal_id = parent.task_type === 'goal' ? parent.id : parent.goal_id;
     if (!goal_id) {
       throw new TasksError('goal_not_found', 'unable to resolve goal_id from parent chain');
+    }
+    if (requested_goal_id !== null && requested_goal_id !== goal_id) {
+      throw new TasksError('goal_mismatch', 'goal_id must match parent chain', {
+        provided_goal_id: requested_goal_id,
+        resolved_goal_id: goal_id,
+      });
     }
 
     return {

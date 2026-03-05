@@ -32,6 +32,7 @@ describe('TaskManager', () => {
       title: 'Child',
       task_type: 'task',
       parent_task_id: task.id,
+      goal_id: goal.id,
       project_id: task.project_id,
     });
 
@@ -44,6 +45,59 @@ describe('TaskManager', () => {
 
     expect(child.goal_id).toBe(goal.id);
     expect(child.depth).toBe(2);
+  });
+
+  it('rejects mismatched goal_id on create_task', () => {
+    context = createTestContext();
+
+    const goalA = context.taskManager.createTask({
+      title: 'Goal A',
+      task_type: 'goal',
+      project_id: 'PROJ-001',
+    });
+    const goalB = context.taskManager.createTask({
+      title: 'Goal B',
+      task_type: 'goal',
+      project_id: 'PROJ-001',
+    });
+
+    expect(() => {
+      context?.taskManager.createTask({
+        title: 'Task',
+        task_type: 'task',
+        parent_task_id: goalA.id,
+        goal_id: goalB.id,
+        project_id: 'PROJ-001',
+      });
+    }).toThrowError(TasksError);
+  });
+
+  it('filters tasks by depth limit', () => {
+    context = createTestContext();
+
+    const goal = context.taskManager.createTask({
+      title: 'Goal',
+      task_type: 'goal',
+      project_id: 'PROJ-001',
+    });
+    const task = context.taskManager.createTask({
+      title: 'Task',
+      task_type: 'task',
+      parent_task_id: goal.id,
+      project_id: 'PROJ-001',
+    });
+    context.taskManager.createTask({
+      title: 'Child',
+      task_type: 'task',
+      parent_task_id: task.id,
+      project_id: 'PROJ-001',
+    });
+
+    const depth1 = context.taskManager.listTasks({ depth: 1 });
+    expect(depth1.map((item) => item.id)).toEqual(
+      expect.arrayContaining([goal.id, task.id]),
+    );
+    expect(depth1.some((item) => item.depth > 1)).toBe(false);
   });
 
   it('rejects reparent updates', () => {

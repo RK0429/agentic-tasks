@@ -13,7 +13,7 @@ const PRIORITY_SCORE: Record<Task['priority'], number> = {
 };
 
 export interface NextTaskInput {
-  project_id: string;
+  project_id?: string;
   assignee?: string;
 }
 
@@ -60,16 +60,23 @@ export class QueueManager {
   }
 
   public next_task(input: NextTaskInput): Task | null {
-    this.ensureProjectWipLimit(input.project_id, input.assignee ?? 'system');
+    if (input.project_id) {
+      this.ensureProjectWipLimit(input.project_id, input.assignee ?? 'system');
+    }
+
+    const where: string[] = ["task_type = 'task'", "status IN ('backlog', 'to_do')"];
+    const values: string[] = [];
+    if (input.project_id) {
+      where.push('project_id = ?');
+      values.push(input.project_id);
+    }
 
     const rows = this.db
       .prepare(
         `
         SELECT *
         FROM tasks
-        WHERE project_id = ?
-          AND task_type = 'task'
-          AND status IN ('backlog', 'to_do')
+        WHERE ${where.join(' AND ')}
         ORDER BY
           CASE priority
             WHEN 'critical' THEN 0
@@ -80,10 +87,47 @@ export class QueueManager {
           created_at ASC
         `,
       )
-      .all(input.project_id) as QueueTaskRow[];
+      .all(...values) as QueueTaskRow[];
 
-    const filtered = rows
-      .filter((row) => !input.assignee || row.assignee === null || row.assignee === input.assignee)
+    const assigneeFiltered = rows.filter(
+      (row) => !input.assignee || row.assignee === null || row.assignee === input.assignee,
+    );
+
+    if (!input.project_id) {
+      const blockedProjects = new Set<string>();
+      const projectIds = [...new Set(assigneeFiltered.map((row) => row.project_id))];
+      for (const project_id of projectIds) {
+        try {
+          this.ensureProjectWipLimit(project_id, input.assignee ?? 'system');
+        } catch (error) {
+          if (error instanceof TasksError && error.code === 'wip_limit_exceeded') {
+            blockedProjects.add(project_id);
+            continue;
+          }
+          throw error;
+        }
+      }
+
+      const ready = assigneeFiltered
+        .filter((row) => !blockedProjects.has(row.project_id))
+        .filter((row) => this.dependencyResolver.are_dependencies_resolved(row.id))
+        .sort((a, b) => PRIORITY_SCORE[a.priority] - PRIORITY_SCORE[b.priority]);
+
+      if (ready.length === 0) {
+        return null;
+      }
+
+      const row = ready[0];
+      return {
+        ...row,
+        acceptance_criteria: row.acceptance_criteria
+          ? (JSON.parse(row.acceptance_criteria) as Task['acceptance_criteria'])
+          : [],
+        metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : null,
+      };
+    }
+
+    const filtered = assigneeFiltered
       .filter((row) => this.dependencyResolver.are_dependencies_resolved(row.id))
       .sort((a, b) => PRIORITY_SCORE[a.priority] - PRIORITY_SCORE[b.priority]);
 
