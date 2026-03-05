@@ -291,17 +291,6 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
 
   registerTool(
     server,
-    'delete_task',
-    'Delete a task (creator only).',
-    {
-      task_id: z.string(),
-      agent_id: z.string(),
-    },
-    (input) => runtime.delete_task(String(input.task_id), String(input.agent_id)),
-  );
-
-  registerTool(
-    server,
     'list_tasks',
     'List tasks with optional filters (status, project, goal, parent, type, assignee).',
     {
@@ -359,7 +348,7 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
   registerTool(
     server,
     'assign_task',
-    'Assign task with WIP limit validation.',
+    'Reassign a task to another agent. For claiming a task yourself, use claim_and_start instead.',
     {
       task_id: z.string(),
       assignee: z.string().nullable(),
@@ -387,7 +376,7 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
   registerTool(
     server,
     'extend_lock',
-    'Extend task lock TTL.',
+    'Extend task lock TTL for long-running work. Not needed for tasks completing within the default lock duration.',
     {
       task_id: z.string(),
       relay_session_id: z.string().optional(),
@@ -404,7 +393,7 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
   registerTool(
     server,
     'resolve_dependencies',
-    'Resolve dependency state for a task.',
+    'Check whether a task\'s dependencies are all satisfied. Also available via get_task(include_dependencies=true).',
     {
       task_id: z.string(),
     },
@@ -414,7 +403,7 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
   registerTool(
     server,
     'next_task',
-    'Get next executable task by priority and dependency resolution with WIP check.',
+    'Get the highest-priority task that is ready to start (dependencies resolved, within WIP limit). Returns one task or null.',
     {
       project_id: z.string().optional(),
       assignee: z.string().optional(),
@@ -440,7 +429,7 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
   registerTool(
     server,
     'get_events',
-    'Get task and quality-gate events with optional filters.',
+    'Search past events by task, project, or event type. For incremental polling, use poll_events instead.',
     {
       task_id: z.string().optional(),
       project_id: z.string().optional(),
@@ -461,7 +450,7 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
   registerTool(
     server,
     'poll_events',
-    'Poll events after cursor with optional long-poll timeout.',
+    'Get new events since a cursor position. Use for incremental event consumption. For historical search, use get_events instead.',
     {
       cursor: z.string().optional(),
       event_types: z.array(z.string()).optional(),
@@ -534,16 +523,6 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
     'List projects.',
     {},
     () => runtime.list_projects(),
-  );
-
-  registerTool(
-    server,
-    'delete_project',
-    'Delete a project. Rejected when project has tasks.',
-    {
-      project_id: z.string(),
-    },
-    (input) => runtime.delete_project(String(input.project_id)),
   );
 
   registerTool(
@@ -688,16 +667,6 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
 
   registerTool(
     server,
-    'delete_schedule',
-    'Delete a schedule.',
-    {
-      schedule_id: z.string(),
-    },
-    (input) => runtime.delete_schedule(String(input.schedule_id)),
-  );
-
-  registerTool(
-    server,
     'list_schedules',
     'List schedules with optional project filter.',
     {
@@ -708,50 +677,8 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
 
   registerTool(
     server,
-    'run_scheduler',
-    'Run due schedules immediately and create tasks.',
-    {},
-    () => runtime.run_scheduler(),
-  );
-
-  registerTool(
-    server,
-    'import_mdtm',
-    'Import MDTM markdown tasks into SQLite.',
-    {
-      source_dir: z.string(),
-      default_project_id: z.string().optional(),
-      project_id: z.string().optional(),
-      clear_existing: z.boolean().default(false),
-    },
-    (input) =>
-      runtime.import_mdtm({
-        source_dir: String(input.source_dir),
-        default_project_id: input.default_project_id as string | undefined,
-        project_id: input.project_id as string | undefined,
-        clear_existing: input.clear_existing as boolean | undefined,
-      }),
-  );
-
-  registerTool(
-    server,
-    'export_mdtm',
-    'Export SQLite tasks to MDTM markdown format.',
-    {
-      target_dir: z.string(),
-      project_id: z.string().optional(),
-    },
-    (input) =>
-      runtime.export_mdtm({
-        target_dir: String(input.target_dir),
-        project_id: input.project_id as string | undefined,
-      }),
-  );
-
-  registerTool(
-    server,
     'stale_lock_cleanup',
-    'Cleanup stale locks by relay session IDs.',
+    'Release locks held by crashed or timed-out sessions. Specify relay_session_id or stale_session_ids to target.',
     {
       stale_session_ids: z.array(z.string()).min(1).optional(),
       relay_session_id: z.string().optional(),
@@ -825,7 +752,7 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
   registerTool(
     server,
     'claim_and_start',
-    'Atomically claim a task: assign + lock + set in_progress.',
+    'Claim a task for yourself: atomically assign + lock + set in_progress. Use this when starting work on a task.',
     {
       task_id: z.string(),
       agent_id: z.string(),
@@ -888,7 +815,7 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
   registerTool(
     server,
     'archive_task',
-    'Archive a task and cascade archive descendants (creator only).',
+    'Cancel a task and cascade-archive all descendants. Use for stopping in-progress work. Completed tasks are auto-deleted by goal cleanup.',
     {
       task_id: z.string(),
       agent_id: z.string(),
@@ -1047,18 +974,6 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
 
   registerTool(
     server,
-    'delete_quality_gate',
-    'Delete quality gate.',
-    {
-      gate_id: z.string(),
-      force: z.boolean().default(false),
-      agent_id: z.string(),
-    },
-    (input) => runtime.delete_quality_gate(input as never),
-  );
-
-  registerTool(
-    server,
     'create_checkpoint',
     'Create checkpoint record.',
     {
@@ -1155,7 +1070,7 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
   registerTool(
     server,
     'trigger_replan',
-    'Trigger replan with discriminated scope changes.',
+    'Modify the WBS under a goal: add/modify/remove tasks and add/remove dependencies in a single operation.',
     {
       goal_id: z.string(),
       agent_id: z.string(),
@@ -1168,7 +1083,7 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
   registerTool(
     server,
     'create_goal',
-    'Create goal task.',
+    'Create a goal (top-level objective) under a project. Preferred over create_task(task_type:"goal") for explicit project binding and acceptance criteria.',
     {
       title: z.string(),
       description: z.string().optional(),

@@ -1,11 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import matter from 'gray-matter';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createMcpServer } from '../src/mcp-server/server.js';
@@ -74,11 +73,8 @@ describe('MCP server integration', () => {
       'create_sprint',
       'complete_sprint',
       'create_schedule',
-      'run_scheduler',
       'get_events',
       'poll_events',
-      'import_mdtm',
-      'export_mdtm',
     ]) {
       expect(toolNames.has(required)).toBe(true);
     }
@@ -266,14 +262,6 @@ describe('MCP server integration', () => {
     const schedulePayload = parseToolText(scheduleResult);
     expect(schedulePayload.success).toBe(true);
 
-    const runSchedule = (await client.callTool({
-      name: 'run_scheduler',
-      arguments: {},
-    })) as CallToolResult;
-    const runPayload = parseToolText(runSchedule);
-    expect(runPayload.success).toBe(true);
-    expect(Array.isArray(runPayload.created_tasks)).toBe(true);
-
     const completeSprint = (await client.callTool({
       name: 'complete_sprint',
       arguments: {
@@ -285,7 +273,7 @@ describe('MCP server integration', () => {
     expect((completedSprintPayload.sprint as { status: string }).status).toBe('completed');
   });
 
-  it('supports get_events/poll_events and MDTM import/export tools', async () => {
+  it('supports get_events/poll_events tools', async () => {
     const goalResult = (await client.callTool({
       name: 'create_goal',
       arguments: {
@@ -330,61 +318,5 @@ describe('MCP server integration', () => {
     const pollPayload = parseToolText(pollResult);
     expect(Array.isArray(pollPayload.events)).toBe(true);
     expect(typeof pollPayload.next_cursor).toBe('string');
-
-    const sourceDir = path.join(tempDir, 'mdtm-source');
-    const exportDir = path.join(tempDir, 'mdtm-export');
-    mkdirSync(path.join(sourceDir, 'GOAL-900', 'TASK-900'), { recursive: true });
-    writeFileSync(
-      path.join(sourceDir, 'GOAL-900', '_goal.md'),
-      matter.stringify('Goal\n', {
-        id: 'GOAL-900',
-        title: 'Imported Goal',
-        status: 'to_do',
-        priority: 'high',
-        task_type: 'goal',
-        project_id: 'PROJ-001',
-      }),
-      'utf8',
-    );
-    writeFileSync(
-      path.join(sourceDir, 'GOAL-900', 'TASK-900', '_task.md'),
-      matter.stringify('Task\n', {
-        id: 'TASK-900',
-        title: 'Imported Task',
-        status: 'to_do',
-        priority: 'medium',
-        task_type: 'task',
-        parent_task_id: 'GOAL-900',
-      }),
-      'utf8',
-    );
-
-    const importResult = (await client.callTool({
-      name: 'import_mdtm',
-      arguments: {
-        source_dir: sourceDir,
-      },
-    })) as CallToolResult;
-    const importPayload = parseToolText(importResult);
-    expect(importPayload.imported_tasks).toBe(2);
-
-    const nextTaskResult = (await client.callTool({
-      name: 'next_task',
-      arguments: {},
-    })) as CallToolResult;
-    const nextTaskPayload = parseToolText(nextTaskResult);
-    expect(nextTaskPayload.success).toBe(true);
-    expect(nextTaskPayload.task).toBeTruthy();
-
-    const exportResult = (await client.callTool({
-      name: 'export_mdtm',
-      arguments: {
-        target_dir: exportDir,
-      },
-    })) as CallToolResult;
-    const exportPayload = parseToolText(exportResult);
-    expect(exportPayload.exported_tasks).toBe(4);
-    expect(Array.isArray(exportPayload.files)).toBe(true);
-    expect((exportPayload.files as unknown[]).length).toBe(4);
   });
 });

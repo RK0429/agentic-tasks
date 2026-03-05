@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-03-05
+
+### Removed
+
+- MCP tools: `delete_task`, `delete_project`, `delete_quality_gate`, `delete_schedule`, `import_mdtm`, `export_mdtm`, `run_scheduler`
+  - `delete_task`/`delete_project`: auto-cleanup handles deletion when goals/projects complete
+  - `delete_quality_gate`/`delete_schedule`: destructive admin operations, use CLI instead
+  - `import_mdtm`/`export_mdtm`/`run_scheduler`: utility operations, use CLI instead
+
+### Improved
+
+- MCP tool descriptions for `assign_task`, `claim_and_start`, `archive_task`, `create_goal`, `next_task`, `stale_lock_cleanup`, `extend_lock`, `trigger_replan`, `get_events`, `poll_events`, `resolve_dependencies`
+
 ## [0.2.1] - 2026-03-05
 
 ### Fixed
