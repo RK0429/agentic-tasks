@@ -62,6 +62,7 @@ describe('MCP server integration', () => {
       'block_task',
       'reopen_task',
       'archive_task',
+      'purge_archived',
       'escalate_task',
       'delegate_task',
       'create_quality_gate',
@@ -332,5 +333,141 @@ describe('MCP server integration', () => {
     const pollPayload = parseToolText(pollResult);
     expect(Array.isArray(pollPayload.events)).toBe(true);
     expect(typeof pollPayload.next_cursor).toBe('string');
+  });
+
+  it('supports purge_archived tool for manual cleanup', async () => {
+    const goalResult = (await client.callTool({
+      name: 'create_goal',
+      arguments: {
+        title: 'Purge Goal',
+        project_id: 'PROJ-001',
+        agent_id: 'lead',
+      },
+    })) as CallToolResult;
+    const goalId = String(parseToolText(goalResult).goal_id);
+
+    const taskResult = (await client.callTool({
+      name: 'create_task',
+      arguments: {
+        title: 'Purge Task',
+        task_type: 'task',
+        parent_task_id: goalId,
+        project_id: 'PROJ-001',
+        agent_id: 'lead',
+      },
+    })) as CallToolResult;
+    const taskId = String((parseToolText(taskResult).task as { id: string }).id);
+
+    await client.callTool({
+      name: 'archive_task',
+      arguments: {
+        task_id: goalId,
+        agent_id: 'lead',
+      },
+    });
+
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 10);
+    });
+
+    const purgeResult = (await client.callTool({
+      name: 'purge_archived',
+      arguments: {
+        retention_hours: 0,
+      },
+    })) as CallToolResult;
+    const purgePayload = parseToolText(purgeResult);
+
+    expect(purgePayload.success).toBe(true);
+    expect(purgePayload.purged_count).toBe(2);
+    expect(purgePayload.retention_hours).toBe(0);
+
+    const listArchived = (await client.callTool({
+      name: 'list_tasks',
+      arguments: {
+        status: 'archived',
+      },
+    })) as CallToolResult;
+    const listPayload = parseToolText(listArchived);
+    const tasks = listPayload.tasks as Array<{ id: string }>;
+    expect(tasks.find((task) => task.id === goalId)).toBeUndefined();
+    expect(tasks.find((task) => task.id === taskId)).toBeUndefined();
+  });
+
+  it('auto-purges archived tasks on interval', async () => {
+    const autoDir = mkdtempSync(path.join(os.tmpdir(), 'agentic-tasks-mcp-autopurge-'));
+    const autoDbPath = path.join(autoDir, 'tasks.db');
+    const { server: autoServer, close: autoClose } = createMcpServer({
+      db_path: autoDbPath,
+      archive_retention_hours: 0,
+      purge_interval_hours: 0.00001,
+    });
+
+    const [autoClientTransport, autoServerTransport] = InMemoryTransport.createLinkedPair();
+    await autoServer.connect(autoServerTransport);
+
+    const autoClient = new Client({ name: 'agentic-tasks-autopurge-test-client', version: '1.0.0' });
+    await autoClient.connect(autoClientTransport);
+
+    try {
+      const goalResult = (await autoClient.callTool({
+        name: 'create_goal',
+        arguments: {
+          title: 'Auto Purge Goal',
+          project_id: 'PROJ-001',
+          agent_id: 'lead',
+        },
+      })) as CallToolResult;
+      const goalId = String(parseToolText(goalResult).goal_id);
+
+      await autoClient.callTool({
+        name: 'create_task',
+        arguments: {
+          title: 'Auto Purge Task',
+          task_type: 'task',
+          parent_task_id: goalId,
+          project_id: 'PROJ-001',
+          agent_id: 'lead',
+        },
+      });
+
+      await autoClient.callTool({
+        name: 'archive_task',
+        arguments: {
+          task_id: goalId,
+          agent_id: 'lead',
+        },
+      });
+
+      let archivedTasks: Array<{ id: string }> = [];
+      for (let i = 0; i < 20; i += 1) {
+        const archived = (await autoClient.callTool({
+          name: 'list_tasks',
+          arguments: {
+            status: 'archived',
+          },
+        })) as CallToolResult;
+        const archivedPayload = parseToolText(archived);
+        archivedTasks = archivedPayload.tasks as Array<{ id: string }>;
+
+        if (archivedTasks.length === 0) {
+          break;
+        }
+
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 25);
+        });
+      }
+
+      expect(archivedTasks).toHaveLength(0);
+    } finally {
+      try {
+        await autoClient.close();
+      } catch {
+        // no-op
+      }
+      autoClose();
+      rmSync(autoDir, { recursive: true, force: true });
+    }
   });
 });

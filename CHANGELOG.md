@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-03-06
+
+### Added
+
+- `purge_archived` MCP tool: physically delete archived tasks older than retention period (default 24h)
+- `TaskManager.purgeArchived(retentionMs)`: core purge method with depth-descending deletion order (leaf→parent) to avoid FK violations
+- `TasksRuntime.purge_archived({ retention_hours? })`: runtime API for purge
+- Auto-purge timer: `createMcpServer` now accepts `archive_retention_hours` (default 24) and `purge_interval_hours` (default 1) options, running periodic cleanup via `setInterval` with `.unref()`
+- `close()` now clears the purge timer before closing the database
+
 ## [0.3.1] - 2026-03-05
 
 ### Added

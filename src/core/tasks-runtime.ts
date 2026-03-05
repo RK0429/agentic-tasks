@@ -1525,6 +1525,19 @@ export class TasksRuntime {
     };
   }
 
+  public purge_archived(input: {
+    retention_hours?: number;
+  }): { purged_count: number; retention_hours: number } {
+    const retentionHours = input.retention_hours ?? 24;
+    const retentionMs = retentionHours * 60 * 60 * 1000;
+    const purged_count = this.taskManager.purgeArchived(retentionMs);
+
+    return {
+      purged_count,
+      retention_hours: retentionHours,
+    };
+  }
+
   public escalate_task(input: EscalateTaskInput): {
     task_id: string;
     new_status: 'escalated';

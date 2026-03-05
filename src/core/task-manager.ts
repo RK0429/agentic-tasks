@@ -476,6 +476,42 @@ export class TaskManager {
     tx();
   }
 
+  /**
+   * Physically delete archived tasks older than retentionMs.
+   * Deletes leaf tasks first (deepest depth), then parents.
+   * Returns the count of deleted tasks.
+   */
+  public purgeArchived(retentionMs: number): number {
+    const cutoff = new Date(Date.now() - retentionMs).toISOString();
+
+    const tx = this.db.transaction(() => {
+      const rows = this.db
+        .prepare(
+          `
+          SELECT id
+          FROM tasks
+          WHERE status = 'archived'
+            AND updated_at < ?
+          ORDER BY depth DESC
+          `,
+        )
+        .all(cutoff) as Array<{ id: string }>;
+
+      if (rows.length === 0) {
+        return 0;
+      }
+
+      const deleteStmt = this.db.prepare('DELETE FROM tasks WHERE id = ?');
+      for (const row of rows) {
+        deleteStmt.run(row.id);
+      }
+
+      return rows.length;
+    });
+
+    return tx();
+  }
+
   public getProjectWip(project_id: string): { wip_count: number; wip_limit: number } {
     const project = this.db
       .prepare('SELECT id, wip_limit FROM projects WHERE id = ? LIMIT 1')

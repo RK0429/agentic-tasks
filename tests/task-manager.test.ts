@@ -3,6 +3,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { TasksError } from '../src/core/errors.js';
 import { createTestContext, type TestContext } from './test-utils.js';
 
+function setUpdatedAt(context: TestContext, taskIds: string[], updatedAt: string): void {
+  const placeholders = taskIds.map(() => '?').join(', ');
+  context.db
+    .prepare(`UPDATE tasks SET updated_at = ? WHERE id IN (${placeholders})`)
+    .run(updatedAt, ...taskIds);
+}
+
 describe('TaskManager', () => {
   let context: TestContext | undefined;
 
@@ -261,22 +268,251 @@ describe('TaskManager', () => {
       context?.runtime.approve_task({ task_id: task.id, agent_id: 'lead' });
     }).toThrowError(TasksError);
 
-    const ready = context.runtime.update_task(task.id, {
-      acceptance_criteria: [
-        {
-          id: 'AC-001',
-          description: 'works',
-          type: 'functional',
-          verified: true,
-          verified_by: 'tester',
-          verified_at: new Date().toISOString(),
-        },
-      ],
-    });
+    const ready = context.runtime.update_task(
+      task.id,
+      {
+        acceptance_criteria: [
+          {
+            id: 'AC-001',
+            description: 'works',
+            type: 'functional',
+            verified: true,
+            verified_by: 'tester',
+            verified_at: new Date().toISOString(),
+          },
+        ],
+      },
+      'lead',
+    );
 
     expect(ready.acceptance_criteria[0]?.verified).toBe(true);
 
     const approved = context.runtime.approve_task({ task_id: task.id, agent_id: 'lead' });
     expect(approved.status).toBe('approved');
+  });
+
+  it('purges archived tasks older than retention', () => {
+    context = createTestContext();
+
+    const goal = context.runtime.create_goal({
+      title: 'Purge Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'owner',
+    });
+    const parent = context.runtime.create_task(
+      {
+        title: 'Purge Parent',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        project_id: 'PROJ-001',
+      },
+      'owner',
+    );
+    const child = context.runtime.create_task(
+      {
+        title: 'Purge Child',
+        task_type: 'task',
+        parent_task_id: parent.id,
+        project_id: 'PROJ-001',
+      },
+      'owner',
+    );
+
+    context.runtime.archive_task({ task_id: goal.goal_id, agent_id: 'system' });
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    setUpdatedAt(context, [goal.goal_id, parent.id, child.id], old);
+
+    const purged = context.taskManager.purgeArchived(24 * 60 * 60 * 1000);
+    expect(purged).toBe(3);
+
+    const remaining = context.db
+      .prepare('SELECT COUNT(*) AS count FROM tasks WHERE id IN (?, ?, ?)')
+      .get(goal.goal_id, parent.id, child.id) as { count: number };
+    expect(remaining.count).toBe(0);
+  });
+
+  it('does not purge archived tasks within retention', () => {
+    context = createTestContext();
+
+    const goal = context.runtime.create_goal({
+      title: 'Recent Archived Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'owner',
+    });
+    const task = context.runtime.create_task(
+      {
+        title: 'Recent Archived Task',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        project_id: 'PROJ-001',
+      },
+      'owner',
+    );
+
+    context.runtime.archive_task({ task_id: goal.goal_id, agent_id: 'system' });
+
+    const purged = context.taskManager.purgeArchived(24 * 60 * 60 * 1000);
+    expect(purged).toBe(0);
+
+    const remaining = context.db
+      .prepare('SELECT COUNT(*) AS count FROM tasks WHERE id IN (?, ?)')
+      .get(goal.goal_id, task.id) as { count: number };
+    expect(remaining.count).toBe(2);
+  });
+
+  it('does not purge non-archived tasks', () => {
+    context = createTestContext();
+
+    const goal = context.runtime.create_goal({
+      title: 'Active Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'owner',
+    });
+    const task = context.runtime.create_task(
+      {
+        title: 'Active Task',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        project_id: 'PROJ-001',
+      },
+      'owner',
+    );
+
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    setUpdatedAt(context, [goal.goal_id, task.id], old);
+
+    const purged = context.taskManager.purgeArchived(24 * 60 * 60 * 1000);
+    expect(purged).toBe(0);
+
+    const remaining = context.db
+      .prepare('SELECT COUNT(*) AS count FROM tasks WHERE id IN (?, ?)')
+      .get(goal.goal_id, task.id) as { count: number };
+    expect(remaining.count).toBe(2);
+  });
+
+  it('purges archived parent and children without FK violations', () => {
+    context = createTestContext();
+
+    const goal = context.runtime.create_goal({
+      title: 'Cascade Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'owner',
+    });
+    const parent = context.runtime.create_task(
+      {
+        title: 'Cascade Parent',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        project_id: 'PROJ-001',
+      },
+      'owner',
+    );
+    const childA = context.runtime.create_task(
+      {
+        title: 'Cascade Child A',
+        task_type: 'task',
+        parent_task_id: parent.id,
+        project_id: 'PROJ-001',
+      },
+      'owner',
+    );
+    const childB = context.runtime.create_task(
+      {
+        title: 'Cascade Child B',
+        task_type: 'task',
+        parent_task_id: parent.id,
+        project_id: 'PROJ-001',
+      },
+      'owner',
+    );
+
+    context.runtime.add_dependency({
+      task_id: childB.id,
+      depends_on: childA.id,
+      agent_id: 'owner',
+    });
+    context.runtime.archive_task({ task_id: goal.goal_id, agent_id: 'system' });
+
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    setUpdatedAt(context, [goal.goal_id, parent.id, childA.id, childB.id], old);
+
+    const purged = context.taskManager.purgeArchived(24 * 60 * 60 * 1000);
+    expect(purged).toBe(4);
+
+    const dependencyRows = context.db
+      .prepare('SELECT COUNT(*) AS count FROM task_dependencies')
+      .get() as { count: number };
+    expect(dependencyRows.count).toBe(0);
+  });
+
+  it('returns the correct purge count for mixed eligible tasks', () => {
+    context = createTestContext();
+
+    const archivedOldA = context.runtime.create_goal({
+      title: 'Archived Old A',
+      project_id: 'PROJ-001',
+      agent_id: 'owner',
+    });
+    const archivedOldB = context.runtime.create_goal({
+      title: 'Archived Old B',
+      project_id: 'PROJ-001',
+      agent_id: 'owner',
+    });
+    const archivedRecent = context.runtime.create_goal({
+      title: 'Archived Recent',
+      project_id: 'PROJ-001',
+      agent_id: 'owner',
+    });
+    const activeGoal = context.runtime.create_goal({
+      title: 'Active Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'owner',
+    });
+
+    context.runtime.archive_task({ task_id: archivedOldA.goal_id, agent_id: 'system' });
+    context.runtime.archive_task({ task_id: archivedOldB.goal_id, agent_id: 'system' });
+    context.runtime.archive_task({ task_id: archivedRecent.goal_id, agent_id: 'system' });
+
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    setUpdatedAt(context, [archivedOldA.goal_id, archivedOldB.goal_id, activeGoal.goal_id], old);
+
+    const purged = context.taskManager.purgeArchived(24 * 60 * 60 * 1000);
+    expect(purged).toBe(2);
+
+    expect(context.taskManager.getTask(archivedOldA.goal_id)).toBeNull();
+    expect(context.taskManager.getTask(archivedOldB.goal_id)).toBeNull();
+    expect(context.taskManager.getTask(archivedRecent.goal_id)).not.toBeNull();
+    expect(context.taskManager.getTask(activeGoal.goal_id)).not.toBeNull();
+  });
+
+  it('purges archived tasks via runtime API', () => {
+    context = createTestContext();
+
+    const goal = context.runtime.create_goal({
+      title: 'Runtime Purge Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'owner',
+    });
+    const task = context.runtime.create_task(
+      {
+        title: 'Runtime Purge Task',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        project_id: 'PROJ-001',
+      },
+      'owner',
+    );
+
+    context.runtime.archive_task({ task_id: goal.goal_id, agent_id: 'system' });
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    setUpdatedAt(context, [goal.goal_id, task.id], old);
+
+    const result = context.runtime.purge_archived({});
+    expect(result).toEqual({
+      purged_count: 2,
+      retention_hours: 24,
+    });
+    expect(context.taskManager.getTask(goal.goal_id)).toBeNull();
+    expect(context.taskManager.getTask(task.id)).toBeNull();
   });
 });

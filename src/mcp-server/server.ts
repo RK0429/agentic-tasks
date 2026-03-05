@@ -85,6 +85,8 @@ function registerTool(
 
 export interface CreateMcpServerOptions {
   db_path?: string;
+  archive_retention_hours?: number;
+  purge_interval_hours?: number;
 }
 
 export function createMcpServer(options: CreateMcpServerOptions = {}): {
@@ -93,10 +95,20 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
   close: () => void;
 } {
   const db_path = options.db_path ?? process.env.AGENTIC_TASKS_DB_PATH ?? DEFAULT_DB_PATH;
+  const archiveRetentionHours = options.archive_retention_hours ?? 24;
+  const purgeIntervalMs = (options.purge_interval_hours ?? 1) * 60 * 60 * 1000;
   mkdirSync(path.dirname(db_path), { recursive: true });
 
   const db = openDatabase({ db_path, initialize: true });
   const runtime = new TasksRuntime(db);
+  const purgeTimer = setInterval(() => {
+    try {
+      runtime.purge_archived({ retention_hours: archiveRetentionHours });
+    } catch {
+      // best-effort cleanup
+    }
+  }, purgeIntervalMs);
+  purgeTimer.unref();
 
   const server = new McpServer({
     name: 'agentic-tasks',
@@ -836,6 +848,19 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
 
   registerTool(
     server,
+    'purge_archived',
+    'Physically delete archived tasks older than the retention period. Default retention: 24 hours.',
+    {
+      retention_hours: z.number().min(0).default(24),
+    },
+    (input) =>
+      runtime.purge_archived({
+        retention_hours: input.retention_hours as number | undefined,
+      }),
+  );
+
+  registerTool(
+    server,
     'escalate_task',
     'Escalate in-progress task.',
     {
@@ -1157,7 +1182,10 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
   return {
     server,
     runtime,
-    close: () => db.close(),
+    close: () => {
+      clearInterval(purgeTimer);
+      db.close();
+    },
   };
 }
 
