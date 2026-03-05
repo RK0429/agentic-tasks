@@ -105,6 +105,17 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
 
   registerTool(
     server,
+    'ping',
+    'Health check endpoint. Returns server status and timestamp.',
+    {},
+    () => ({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+    }),
+  );
+
+  registerTool(
+    server,
     'create_task',
     'Create a task with hierarchy fields, phase and expected effort.',
     {

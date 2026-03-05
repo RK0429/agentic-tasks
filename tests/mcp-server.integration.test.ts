@@ -53,6 +53,7 @@ describe('MCP server integration', () => {
     const toolNames = new Set(tools.tools.map((tool) => tool.name));
 
     for (const required of [
+      'ping',
       'decompose_task',
       'claim_and_start',
       'extend_lock',
@@ -271,6 +272,19 @@ describe('MCP server integration', () => {
     const completedSprintPayload = parseToolText(completeSprint);
     expect(completedSprintPayload.success).toBe(true);
     expect((completedSprintPayload.sprint as { status: string }).status).toBe('completed');
+  });
+
+  it('supports ping health check tool', async () => {
+    const pingResult = (await client.callTool({
+      name: 'ping',
+      arguments: {},
+    })) as CallToolResult;
+
+    const pingPayload = parseToolText(pingResult);
+    expect(pingPayload.success).toBe(true);
+    expect(pingPayload.status).toBe('ok');
+    expect(typeof pingPayload.timestamp).toBe('string');
+    expect(() => new Date(String(pingPayload.timestamp)).toISOString()).not.toThrow();
   });
 
   it('supports get_events/poll_events tools', async () => {

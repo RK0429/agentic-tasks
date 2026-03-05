@@ -541,7 +541,11 @@ export class TaskManager {
     }
 
     if (!parent_task_id) {
-      throw new TasksError('parent_required', 'task requires parent_task_id');
+      if (requested_goal_id) {
+        parent_task_id = requested_goal_id;
+      } else {
+        throw new TasksError('parent_required', 'task requires parent_task_id');
+      }
     }
 
     const parent = this.db

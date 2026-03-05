@@ -47,6 +47,70 @@ describe('TaskManager', () => {
     expect(child.depth).toBe(2);
   });
 
+  it('creates task under goal when only goal_id is provided', () => {
+    context = createTestContext();
+
+    const goal = context.runtime.create_goal({
+      title: 'Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'lead',
+    });
+
+    const task = context.runtime.create_task(
+      {
+        title: 'Task',
+        task_type: 'task',
+        goal_id: goal.goal_id,
+        project_id: 'PROJ-001',
+      },
+      'lead',
+    );
+
+    expect(task.parent_task_id).toBe(goal.goal_id);
+    expect(task.goal_id).toBe(goal.goal_id);
+    expect(task.depth).toBe(1);
+  });
+
+  it('keeps existing behavior when both goal_id and parent_task_id are provided', () => {
+    context = createTestContext();
+
+    const goal = context.runtime.create_goal({
+      title: 'Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'lead',
+    });
+
+    const task = context.runtime.create_task(
+      {
+        title: 'Task',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        goal_id: goal.goal_id,
+        project_id: 'PROJ-001',
+      },
+      'lead',
+    );
+
+    expect(task.parent_task_id).toBe(goal.goal_id);
+    expect(task.goal_id).toBe(goal.goal_id);
+    expect(task.depth).toBe(1);
+  });
+
+  it('keeps throwing parent_required when goal_id and parent_task_id are both missing', () => {
+    context = createTestContext();
+
+    expect(() => {
+      context?.runtime.create_task(
+        {
+          title: 'Task',
+          task_type: 'task',
+          project_id: 'PROJ-001',
+        },
+        'lead',
+      );
+    }).toThrowError('task requires parent_task_id');
+  });
+
   it('rejects mismatched goal_id on create_task', () => {
     context = createTestContext();
 
