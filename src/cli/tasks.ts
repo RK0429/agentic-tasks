@@ -14,6 +14,7 @@ import {
   TasksError,
 } from '../core/index.js';
 import { openDatabase } from '../db/index.js';
+import { startMcpServer } from '../mcp-server/index.js';
 import { exportSqliteToMdtm, importMdtmToSqlite, verifyMigration } from '../migration/index.js';
 import type { TaskStatus } from '../types/index.js';
 
@@ -654,6 +655,17 @@ async function main(): Promise<void> {
         success: result.passed,
         ...result,
       });
+    });
+
+  // --- MCP Server ---
+  const mcp = program.command('mcp').description('MCP server commands');
+
+  mcp
+    .command('serve')
+    .description('Start MCP server (stdio transport)')
+    .action(async function action() {
+      const db_path = this.parent?.parent?.opts().db ?? DEFAULT_DB_PATH;
+      await startMcpServer({ db_path });
     });
 
   await program.parseAsync(process.argv);
