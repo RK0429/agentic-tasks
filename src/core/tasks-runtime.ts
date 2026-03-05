@@ -117,7 +117,33 @@ export interface CompleteTaskInput {
   agent_id: string;
   actual_effort_ms?: number;
   result_summary?: string;
-  skip_review?: boolean;
+}
+
+export interface GoalCleanupResult {
+  goal_id: string;
+  title: string;
+  tasks_deleted: string[];
+  summary: {
+    total_tasks: number;
+    total_effort_ms: number | null;
+    result_summaries: Array<{ task_id: string; title: string; summary: string | null }>;
+  };
+}
+
+export interface ProjectCleanupResult {
+  project_id: string;
+  name: string;
+  goals_deleted: string[];
+  summary: {
+    total_goals: number;
+    total_tasks: number;
+    total_effort_ms: number | null;
+  };
+}
+
+export interface CleanupResult {
+  goal_cleaned?: GoalCleanupResult;
+  project_cleaned?: ProjectCleanupResult;
 }
 
 export interface EscalateTaskInput {
@@ -698,12 +724,28 @@ export class TasksRuntime {
 
     const task = this.taskManager.getTask(input.task_id);
     if (task && task.status === 'in_progress') {
-      this.taskManager.updateTask(
-        input.task_id,
-        { status: 'to_do' },
-        input.agent_id,
-        input.agent_id,
-      );
+      this.db
+        .prepare(
+          `
+          UPDATE tasks
+          SET status = ?,
+              updated_at = ?,
+              version = version + 1
+          WHERE id = ?
+          `,
+        )
+        .run('to_do', nowIso(), task.id);
+
+      this.eventEmitter.emit_task_event({
+        task_id: task.id,
+        event_type: 'status_changed',
+        data: {
+          from: task.status,
+          to: 'to_do',
+          reason: 'manual_release',
+        },
+        triggered_by: input.agent_id,
+      });
     }
 
     return {
@@ -998,8 +1040,8 @@ export class TasksRuntime {
 
     this.accessControl.ensure_task_action('complete_task', task.id, input.agent_id);
 
-    if (task.status !== 'in_progress' && task.status !== 'review') {
-      throw new TasksError('invalid_status', 'only in_progress or review task can be completed', {
+    if (task.status !== 'in_progress') {
+      throw new TasksError('invalid_status', 'only in_progress task can be completed', {
         status: task.status,
       });
     }
@@ -1017,15 +1059,8 @@ export class TasksRuntime {
         .get(task.id) as { count: number }
     ).count;
 
-    const skip_review = input.skip_review ?? false;
-    let nextStatus: 'review' | 'done';
-
-    if (task.status === 'review') {
-      this.qualityGateManager.assert_review_to_done_allowed(task.id, input.agent_id);
-      nextStatus = 'done';
-    } else {
-      nextStatus = requiredGateCount > 0 ? 'review' : skip_review ? 'done' : 'review';
-    }
+    const skip_review = task.metadata?.skip_review === true;
+    const nextStatus: 'review' | 'done' = skip_review ? 'done' : 'review';
 
     if (nextStatus === 'done') {
       this.ensureChildTasksDone(task.id);
@@ -1066,14 +1101,16 @@ export class TasksRuntime {
 
       this.db.prepare('DELETE FROM task_locks WHERE task_id = ?').run(task.id);
 
-      this.eventEmitter.emit_task_event({
-        task_id: task.id,
-        event_type: 'unlocked',
-        data: {
-          released_by: input.agent_id,
-        },
-        triggered_by: input.agent_id,
-      });
+      if (lock) {
+        this.eventEmitter.emit_task_event({
+          task_id: task.id,
+          event_type: 'unlocked',
+          data: {
+            released_by: input.agent_id,
+          },
+          triggered_by: input.agent_id,
+        });
+      }
 
       this.eventEmitter.emit_task_event({
         task_id: task.id,
@@ -1101,9 +1138,8 @@ export class TasksRuntime {
 
     if (nextStatus === 'done') {
       this.unblockResolvedDependents(task.id, input.agent_id);
+      this.maybeRunCleanup(task.id, input.agent_id);
     }
-
-    const parentAutoReview = this.refreshGoalStatus(task.id, input.agent_id);
 
     return {
       status: 'completed',
@@ -1111,7 +1147,381 @@ export class TasksRuntime {
       new_status: nextStatus,
       lock_released: Boolean(lock),
       parent_progress_updated: Boolean(task.goal_id),
-      parent_auto_review: parentAutoReview,
+      parent_auto_review: false,
+    };
+  }
+
+  public approve_task(input: {
+    task_id: string;
+    agent_id: string;
+    result_summary?: string;
+  }):
+    | {
+        status: 'approved';
+        task_id: string;
+        new_status: 'done';
+        cleanup?: CleanupResult;
+      }
+    | {
+        status: 'already_completed';
+        task_id: string;
+        completed_at: string;
+      } {
+    const task = this.taskManager.getTask(input.task_id);
+    if (!task) {
+      throw new TasksError('task_not_found', `task not found: ${input.task_id}`);
+    }
+
+    const latestCompletion = this.db
+      .prepare(
+        `
+        SELECT id, task_id, event_type, data, triggered_by, created_at
+        FROM task_events
+        WHERE task_id = ?
+          AND event_type IN ('task_completed', 'task_approved')
+        ORDER BY id DESC
+        LIMIT 1
+        `,
+      )
+      .get(task.id) as TaskEventRow | undefined;
+
+    if (task.status === 'done') {
+      return {
+        status: 'already_completed',
+        task_id: task.id,
+        completed_at: latestCompletion?.created_at ?? task.updated_at,
+      };
+    }
+
+    this.accessControl.ensure_task_action('approve_task', task.id, input.agent_id);
+
+    if (task.status !== 'review') {
+      throw new TasksError('invalid_status', 'only review task can be approved', {
+        status: task.status,
+      });
+    }
+
+    this.ensureChildTasksDone(task.id);
+    this.qualityGateManager.assert_review_to_done_allowed(task.id, input.agent_id);
+
+    const now = nowIso();
+    const completion = (task.metadata?.completion ?? {}) as Record<string, unknown>;
+    const updatedMetadata = {
+      ...(task.metadata ?? {}),
+      completion: {
+        ...completion,
+        result_summary: input.result_summary ?? completion.result_summary ?? null,
+        approved_by: input.agent_id,
+        approved_at: now,
+      },
+    };
+
+    this.db
+      .prepare(
+        `
+        UPDATE tasks
+        SET status = ?,
+            metadata = ?,
+            updated_at = ?,
+            version = version + 1
+        WHERE id = ?
+        `,
+      )
+      .run('done', JSON.stringify(updatedMetadata), now, task.id);
+
+    this.eventEmitter.emit_task_event({
+      task_id: task.id,
+      event_type: 'status_changed',
+      data: {
+        from: task.status,
+        to: 'done',
+      },
+      triggered_by: input.agent_id,
+    });
+
+    this.eventEmitter.emit_task_event({
+      task_id: task.id,
+      event_type: 'task_approved',
+      data: {
+        result_summary: input.result_summary ?? null,
+      },
+      triggered_by: input.agent_id,
+    });
+
+    this.unblockResolvedDependents(task.id, input.agent_id);
+    const cleanup = this.maybeRunCleanup(task.id, input.agent_id);
+
+    return {
+      status: 'approved',
+      task_id: task.id,
+      new_status: 'done',
+      ...(cleanup ? { cleanup } : {}),
+    };
+  }
+
+  public block_task(input: {
+    task_id: string;
+    agent_id: string;
+    reason: string;
+    blocked_by?: string;
+  }): { task_id: string; new_status: 'blocked' } {
+    this.accessControl.ensure_task_action('block_task', input.task_id, input.agent_id);
+
+    const task = this.taskManager.getTask(input.task_id);
+    if (!task) {
+      throw new TasksError('task_not_found', `task not found: ${input.task_id}`);
+    }
+
+    if (task.status !== 'in_progress') {
+      throw new TasksError('invalid_status', 'only in_progress task can be blocked', {
+        status: task.status,
+      });
+    }
+
+    const lock = this.lockManager.get_lock(task.id);
+    if (lock && lock.agent_id !== input.agent_id) {
+      throw new TasksError('lock_owner_mismatch', 'lock owned by another agent', {
+        task_id: task.id,
+        lock_holder: lock.agent_id,
+      });
+    }
+
+    const now = nowIso();
+    const updatedMetadata = {
+      ...(task.metadata ?? {}),
+      block: {
+        reason: input.reason,
+        blocked_by: input.blocked_by ?? null,
+        blocked_at: now,
+      },
+    };
+
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `
+          UPDATE tasks
+          SET status = ?,
+              metadata = ?,
+              updated_at = ?,
+              version = version + 1
+          WHERE id = ?
+          `,
+        )
+        .run('blocked', JSON.stringify(updatedMetadata), now, task.id);
+
+      this.db.prepare('DELETE FROM task_locks WHERE task_id = ?').run(task.id);
+
+      if (lock) {
+        this.eventEmitter.emit_task_event({
+          task_id: task.id,
+          event_type: 'unlocked',
+          data: {
+            released_by: input.agent_id,
+            reason: 'task_blocked',
+          },
+          triggered_by: input.agent_id,
+        });
+      }
+
+      this.eventEmitter.emit_task_event({
+        task_id: task.id,
+        event_type: 'status_changed',
+        data: {
+          from: task.status,
+          to: 'blocked',
+          reason: input.reason,
+          blocked_by: input.blocked_by ?? null,
+        },
+        triggered_by: input.agent_id,
+      });
+
+      this.eventEmitter.emit_task_event({
+        task_id: task.id,
+        event_type: 'task_blocked',
+        data: {
+          reason: input.reason,
+          blocked_by: input.blocked_by ?? null,
+        },
+        triggered_by: input.agent_id,
+      });
+    });
+
+    tx();
+
+    return {
+      task_id: task.id,
+      new_status: 'blocked',
+    };
+  }
+
+  public reopen_task(input: {
+    task_id: string;
+    agent_id: string;
+    reason?: string;
+  }): { task_id: string; new_status: 'to_do' } {
+    this.accessControl.ensure_task_action('reopen_task', input.task_id, input.agent_id);
+
+    const task = this.taskManager.getTask(input.task_id);
+    if (!task) {
+      throw new TasksError('task_not_found', `task not found: ${input.task_id}`);
+    }
+
+    if (task.status !== 'review' && task.status !== 'blocked' && task.status !== 'escalated') {
+      throw new TasksError('invalid_status', 'only review/blocked/escalated task can be reopened', {
+        status: task.status,
+      });
+    }
+
+    const now = nowIso();
+    const lock = this.lockManager.get_lock(task.id);
+
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `
+          UPDATE tasks
+          SET status = ?,
+              updated_at = ?,
+              version = version + 1
+          WHERE id = ?
+          `,
+        )
+        .run('to_do', now, task.id);
+
+      this.db.prepare('DELETE FROM task_locks WHERE task_id = ?').run(task.id);
+
+      if (lock) {
+        this.eventEmitter.emit_task_event({
+          task_id: task.id,
+          event_type: 'unlocked',
+          data: {
+            released_by: input.agent_id,
+            reason: 'task_reopened',
+          },
+          triggered_by: input.agent_id,
+        });
+      }
+
+      this.eventEmitter.emit_task_event({
+        task_id: task.id,
+        event_type: 'status_changed',
+        data: {
+          from: task.status,
+          to: 'to_do',
+          reason: input.reason ?? null,
+        },
+        triggered_by: input.agent_id,
+      });
+    });
+
+    tx();
+
+    return {
+      task_id: task.id,
+      new_status: 'to_do',
+    };
+  }
+
+  public archive_task(input: {
+    task_id: string;
+    agent_id: string;
+  }): { task_id: string; new_status: 'archived'; descendants_archived: string[] } {
+    this.accessControl.ensure_task_action('archive_task', input.task_id, input.agent_id);
+
+    const task = this.taskManager.getTask(input.task_id);
+    if (!task) {
+      throw new TasksError('task_not_found', `task not found: ${input.task_id}`);
+    }
+
+    const descendants = this.db
+      .prepare(
+        `
+        WITH RECURSIVE descendants AS (
+          SELECT id, status FROM tasks WHERE parent_task_id = ?
+          UNION ALL
+          SELECT t.id, t.status
+          FROM tasks t
+          INNER JOIN descendants d ON t.parent_task_id = d.id
+        )
+        SELECT id, status FROM descendants
+        `,
+      )
+      .all(task.id) as Array<{ id: string; status: TaskStatus }>;
+
+    const blockingIds = [
+      ...(task.status === 'in_progress' ? [task.id] : []),
+      ...descendants.filter((descendant) => descendant.status === 'in_progress').map((node) => node.id),
+    ];
+    if (blockingIds.length > 0) {
+      throw new TasksError('descendant_in_progress', 'cannot archive while task is in_progress', {
+        blocking_task_ids: blockingIds,
+      });
+    }
+
+    const now = nowIso();
+    const descendants_archived: string[] = [];
+    const nodes = [{ id: task.id, status: task.status }, ...descendants];
+
+    const tx = this.db.transaction(() => {
+      for (const node of nodes) {
+        if (node.status === 'archived') {
+          continue;
+        }
+
+        this.db
+          .prepare('UPDATE tasks SET status = ?, version = version + 1, updated_at = ? WHERE id = ?')
+          .run('archived', now, node.id);
+
+        if (node.id !== task.id) {
+          descendants_archived.push(node.id);
+        }
+
+        this.eventEmitter.emit_task_event({
+          task_id: node.id,
+          event_type: 'status_changed',
+          data: {
+            from: node.status,
+            to: 'archived',
+            reason: node.id === task.id ? 'archive_task' : 'cascade_archive',
+            root_task_id: task.id,
+          },
+          triggered_by: input.agent_id,
+        });
+      }
+
+      const locks = this.db
+        .prepare(
+          `
+          SELECT task_id
+          FROM task_locks
+          WHERE task_id IN (${nodes.map(() => '?').join(', ')})
+          `,
+        )
+        .all(...nodes.map((node) => node.id)) as Array<{ task_id: string }>;
+
+      for (const lock of locks) {
+        this.db.prepare('DELETE FROM task_locks WHERE task_id = ?').run(lock.task_id);
+        this.eventEmitter.emit_task_event({
+          task_id: lock.task_id,
+          event_type: 'unlocked',
+          data: {
+            released_by: input.agent_id,
+            reason: 'archived',
+          },
+          triggered_by: input.agent_id,
+        });
+      }
+    });
+
+    tx();
+
+    this.maybeRunCleanup(task.id, input.agent_id);
+
+    return {
+      task_id: task.id,
+      new_status: 'archived',
+      descendants_archived,
     };
   }
 
@@ -1152,15 +1562,28 @@ export class TasksRuntime {
       },
     };
 
-    this.taskManager.updateTask(
-      task.id,
-      {
-        status: 'escalated',
-        metadata,
+    this.db
+      .prepare(
+        `
+        UPDATE tasks
+        SET status = ?,
+            metadata = ?,
+            updated_at = ?,
+            version = version + 1
+        WHERE id = ?
+        `,
+      )
+      .run('escalated', JSON.stringify(metadata), nowIso(), task.id);
+
+    this.eventEmitter.emit_task_event({
+      task_id: task.id,
+      event_type: 'status_changed',
+      data: {
+        from: task.status,
+        to: 'escalated',
       },
-      input.agent_id,
-      input.agent_id,
-    );
+      triggered_by: input.agent_id,
+    });
 
     this.eventEmitter.emit_task_event({
       task_id: task.id,
@@ -1874,7 +2297,7 @@ export class TasksRuntime {
         );
         summary.tasks_modified += 1;
       } else if (change.type === 'remove_task') {
-        this.update_task(change.task_id, { status: 'archived' }, input.agent_id);
+        this.archive_task({ task_id: change.task_id, agent_id: input.agent_id });
         summary.tasks_removed += 1;
       } else if (change.type === 'add_dependency') {
         this.dependencyResolver.add_dependency({
@@ -1970,6 +2393,7 @@ export class TasksRuntime {
         source_ref: input.source_ref,
         priority: input.priority,
         task_type: 'goal',
+        assignee: input.agent_id,
       },
       input.agent_id,
     );
@@ -2688,7 +3112,44 @@ export class TasksRuntime {
         continue;
       }
 
-      this.taskManager.updateTask(target.id, { status: 'to_do' }, triggered_by, 'system');
+      const lock = this.lockManager.get_lock(target.id);
+      const now = nowIso();
+      this.db
+        .prepare(
+          `
+          UPDATE tasks
+          SET status = ?,
+              updated_at = ?,
+              version = version + 1
+          WHERE id = ?
+          `,
+        )
+        .run('to_do', now, target.id);
+
+      this.db.prepare('DELETE FROM task_locks WHERE task_id = ?').run(target.id);
+
+      if (lock) {
+        this.eventEmitter.emit_task_event({
+          task_id: target.id,
+          event_type: 'unlocked',
+          data: {
+            released_by: triggered_by,
+            reason: 'dependency_resolved',
+          },
+          triggered_by,
+        });
+      }
+
+      this.eventEmitter.emit_task_event({
+        task_id: target.id,
+        event_type: 'status_changed',
+        data: {
+          from: target.status,
+          to: 'to_do',
+          reason: 'dependency_resolved',
+        },
+        triggered_by,
+      });
 
       this.eventEmitter.emit_task_event({
         task_id: target.id,
@@ -2710,47 +3171,287 @@ export class TasksRuntime {
     }
   }
 
-  private refreshGoalStatus(task_id: string, triggered_by: string): boolean {
+  private maybeRunCleanup(task_id: string, triggered_by: string): CleanupResult | undefined {
     const task = this.taskManager.getTask(task_id);
-    if (!task || !task.goal_id || task.goal_id === task.id) {
-      return false;
+    if (!task) {
+      return undefined;
     }
 
-    const goal = this.taskManager.getTask(task.goal_id);
-    if (!goal) {
-      return false;
+    const goal_id =
+      task.task_type === 'goal'
+        ? task.id
+        : task.goal_id;
+    if (!goal_id) {
+      return undefined;
     }
 
-    const children = this.taskManager.listTasks({ parent_task_id: goal.id, task_type: 'task', limit: 10_000 });
-    if (children.length === 0) {
-      return false;
+    const goalCleanup = this.cleanupGoalIfReady(goal_id, triggered_by);
+    if (!goalCleanup) {
+      return undefined;
     }
 
-    const allDone = children.every((child) => child.status === 'done' || child.status === 'archived');
-    if (!allDone) {
-      return false;
+    const projectCleanup = this.cleanupProjectIfReady(goalCleanup.project_id);
+    return {
+      goal_cleaned: goalCleanup.result,
+      ...(projectCleanup ? { project_cleaned: projectCleanup } : {}),
+    };
+  }
+
+  private cleanupGoalIfReady(
+    goal_id: string,
+    triggered_by: string,
+  ): { result: GoalCleanupResult; project_id: string } | null {
+    const goal = this.taskManager.getTask(goal_id);
+    if (!goal || goal.task_type !== 'goal' || goal.status === 'archived') {
+      return null;
     }
 
-    if (goal.status === 'review' || goal.status === 'done' || goal.status === 'archived') {
-      return false;
+    const tasks = this.db
+      .prepare(
+        `
+        SELECT id, title, status, depth, actual_effort_ms, metadata
+        FROM tasks
+        WHERE goal_id = ?
+          AND task_type = 'task'
+        ORDER BY created_at ASC
+        `,
+      )
+      .all(goal.id) as Array<{
+      id: string;
+      title: string;
+      status: TaskStatus;
+      depth: number;
+      actual_effort_ms: number | null;
+      metadata: string | null;
+    }>;
+
+    if (tasks.length === 0) {
+      return null;
     }
 
-    this.db
-      .prepare('UPDATE tasks SET status = ?, updated_at = ?, version = version + 1 WHERE id = ?')
-      .run('review', nowIso(), goal.id);
+    if (tasks.some((task) => task.status === 'in_progress')) {
+      return null;
+    }
 
-    this.eventEmitter.emit_task_event({
-      task_id: goal.id,
-      event_type: 'status_changed',
-      data: {
-        from: goal.status,
-        to: 'review',
-        reason: 'all_children_done',
+    const lockCount = this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS count
+        FROM task_locks
+        WHERE task_id IN (${[goal.id, ...tasks.map((task) => task.id)].map(() => '?').join(', ')})
+        `,
+      )
+      .get(goal.id, ...tasks.map((task) => task.id)) as { count: number };
+
+    if (lockCount.count > 0) {
+      return null;
+    }
+
+    const allCompleted = tasks.every((task) => task.status === 'done' || task.status === 'archived');
+    if (!allCompleted) {
+      return null;
+    }
+
+    const totalEffortRaw = tasks.reduce((sum, task) => sum + (task.actual_effort_ms ?? 0), 0);
+    const hasEffort = tasks.some((task) => task.actual_effort_ms !== null);
+    const summary: GoalCleanupResult['summary'] = {
+      total_tasks: tasks.length,
+      total_effort_ms: hasEffort ? totalEffortRaw : null,
+      result_summaries: tasks.map((task) => {
+        const metadata = parseJson<Record<string, unknown>>(task.metadata, {});
+        const completion = (metadata.completion ?? {}) as Record<string, unknown>;
+        return {
+          task_id: task.id,
+          title: task.title,
+          summary: typeof completion.result_summary === 'string' ? completion.result_summary : null,
+        };
+      }),
+    };
+
+    const now = nowIso();
+    const goalMetadata = {
+      ...(goal.metadata ?? {}),
+      cleanup_summary: {
+        ...summary,
+        cleaned_at: now,
       },
-      triggered_by,
+    };
+
+    const tx = this.db.transaction(() => {
+      if (goal.status !== 'done') {
+        this.db
+          .prepare(
+            `
+            UPDATE tasks
+            SET status = ?,
+                metadata = ?,
+                updated_at = ?,
+                version = version + 1
+            WHERE id = ?
+            `,
+          )
+          .run('done', JSON.stringify(goalMetadata), now, goal.id);
+
+        this.eventEmitter.emit_task_event({
+          task_id: goal.id,
+          event_type: 'status_changed',
+          data: {
+            from: goal.status,
+            to: 'done',
+            reason: 'goal_cleanup',
+          },
+          triggered_by,
+        });
+      } else {
+        this.db
+          .prepare(
+            `
+            UPDATE tasks
+            SET metadata = ?,
+                updated_at = ?,
+                version = version + 1
+            WHERE id = ?
+            `,
+          )
+          .run(JSON.stringify(goalMetadata), now, goal.id);
+      }
+
+      const deleteById = this.db.prepare('DELETE FROM tasks WHERE id = ?');
+      for (const task of [...tasks].sort((a, b) => b.depth - a.depth)) {
+        deleteById.run(task.id);
+      }
     });
 
-    return true;
+    tx();
+
+    return {
+      result: {
+        goal_id: goal.id,
+        title: goal.title,
+        tasks_deleted: tasks.map((task) => task.id),
+        summary,
+      },
+      project_id: goal.project_id,
+    };
+  }
+
+  private cleanupProjectIfReady(project_id: string): ProjectCleanupResult | null {
+    const project = this.db
+      .prepare('SELECT id, name FROM projects WHERE id = ? LIMIT 1')
+      .get(project_id) as { id: string; name: string } | undefined;
+
+    if (!project) {
+      return null;
+    }
+
+    const goals = this.db
+      .prepare(
+        `
+        SELECT id, status, metadata
+        FROM tasks
+        WHERE project_id = ?
+          AND task_type = 'goal'
+        ORDER BY created_at ASC
+        `,
+      )
+      .all(project.id) as Array<{ id: string; status: TaskStatus; metadata: string | null }>;
+
+    if (goals.length === 0) {
+      return null;
+    }
+
+    if (!goals.every((goal) => goal.status === 'done')) {
+      return null;
+    }
+
+    const inProgress = this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS count
+        FROM tasks
+        WHERE project_id = ?
+          AND status = 'in_progress'
+        `,
+      )
+      .get(project.id) as { count: number };
+    if (inProgress.count > 0) {
+      return null;
+    }
+
+    const locks = this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS count
+        FROM task_locks l
+        JOIN tasks t ON t.id = l.task_id
+        WHERE t.project_id = ?
+        `,
+      )
+      .get(project.id) as { count: number };
+    if (locks.count > 0) {
+      return null;
+    }
+
+    let total_tasks = 0;
+    let total_effort_sum = 0;
+    let hasEffort = false;
+
+    for (const goal of goals) {
+      const metadata = parseJson<Record<string, unknown>>(goal.metadata, {});
+      const cleanup = (metadata.cleanup_summary ?? {}) as Record<string, unknown>;
+
+      const summaryTasks =
+        typeof cleanup.total_tasks === 'number' && Number.isFinite(cleanup.total_tasks)
+          ? Math.max(0, Math.trunc(cleanup.total_tasks))
+          : 0;
+      const summaryEffort =
+        typeof cleanup.total_effort_ms === 'number' && Number.isFinite(cleanup.total_effort_ms)
+          ? Math.max(0, cleanup.total_effort_ms)
+          : null;
+
+      total_tasks += summaryTasks;
+      if (summaryEffort !== null) {
+        total_effort_sum += summaryEffort;
+        hasEffort = true;
+      }
+    }
+
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `
+          DELETE FROM tasks
+          WHERE project_id = ?
+            AND task_type = 'task'
+          `,
+        )
+        .run(project.id);
+
+      this.db
+        .prepare(
+          `
+          DELETE FROM tasks
+          WHERE project_id = ?
+            AND task_type = 'goal'
+          `,
+        )
+        .run(project.id);
+
+      this.db.prepare('DELETE FROM projects WHERE id = ?').run(project.id);
+    });
+
+    tx();
+
+    return {
+      project_id: project.id,
+      name: project.name,
+      goals_deleted: goals.map((goal) => goal.id),
+      summary: {
+        total_goals: goals.length,
+        total_tasks,
+        total_effort_ms: hasEffort ? total_effort_sum : null,
+      },
+    };
   }
 
   private ensureCheckpointAccess(project_id: string, goal_id: string | null, agent_id: string): void {

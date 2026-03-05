@@ -34,7 +34,6 @@ export interface TaskHookClient {
     agent_id: string;
     actual_effort_ms?: number;
     result_summary?: string;
-    skip_review?: boolean;
   }):
     | {
         status: 'completed';

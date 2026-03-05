@@ -102,11 +102,16 @@ describe('Phase 4 E2E patterns 1-5', () => {
     expect(context.lockManager.get_lock(task.id)).toBeNull();
   });
 
-  it('Pattern 1b: fractal delegation with quality gate and goal auto-review', () => {
+  it('Pattern 1b: fractal delegation with quality gate and goal cleanup', () => {
     context = createTestContext();
 
     const goal = context.runtime.create_goal({
       title: 'Pattern1b Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'lead',
+    });
+    context.runtime.create_goal({
+      title: 'Pattern1b Open Goal',
       project_id: 'PROJ-001',
       agent_id: 'lead',
     });
@@ -127,7 +132,6 @@ describe('Phase 4 E2E patterns 1-5', () => {
       'lead',
     );
 
-    context.runtime.update_task(parent.id, { status: 'to_do' }, 'lead');
     context.runtime.claim_and_start({
       task_id: parent.id,
       agent_id: 'specialist',
@@ -148,11 +152,13 @@ describe('Phase 4 E2E patterns 1-5', () => {
     }
 
     context.runtime.claim_and_start({ task_id: childA, agent_id: 'worker-a', relay_session_id: 'relay-a' });
-    const completedA = context.runtime.complete_task({ task_id: childA, agent_id: 'worker-a', skip_review: true });
+    const completedA = context.runtime.complete_task({ task_id: childA, agent_id: 'worker-a' });
+    context.runtime.approve_task({ task_id: childA, agent_id: 'specialist' });
     expect(completedA.status).toBe('completed');
 
     context.runtime.claim_and_start({ task_id: childB, agent_id: 'worker-b', relay_session_id: 'relay-b' });
-    const completedB = context.runtime.complete_task({ task_id: childB, agent_id: 'worker-b', skip_review: true });
+    const completedB = context.runtime.complete_task({ task_id: childB, agent_id: 'worker-b' });
+    context.runtime.approve_task({ task_id: childB, agent_id: 'specialist' });
     expect(completedB.status).toBe('completed');
 
     const gate = context.runtime.create_quality_gate(
@@ -189,11 +195,15 @@ describe('Phase 4 E2E patterns 1-5', () => {
       evaluator_backend: 'codex',
     });
 
-    const doneParent = context.runtime.update_task(parent.id, { status: 'done' }, 'specialist');
-    expect(doneParent.status).toBe('done');
+    const doneParent = context.runtime.approve_task({
+      task_id: parent.id,
+      agent_id: 'lead',
+      result_summary: 'approved',
+    });
+    expect(doneParent.status).toBe('approved');
 
     const refreshedGoal = context.taskManager.getTask(goal.goal_id);
-    expect(refreshedGoal?.status).toBe('review');
+    expect(refreshedGoal?.status).toBe('done');
   });
 
   it('Pattern 2: crash recovery via stale_lock_cleanup and next_task reacquire', async () => {
@@ -216,7 +226,6 @@ describe('Phase 4 E2E patterns 1-5', () => {
       'lead',
     );
 
-    context.runtime.update_task(task.id, { status: 'to_do' }, 'lead');
     context.runtime.claim_and_start({
       task_id: task.id,
       agent_id: 'worker',
@@ -262,7 +271,6 @@ describe('Phase 4 E2E patterns 1-5', () => {
       'lead',
     );
 
-    context.runtime.update_task(task.id, { status: 'to_do' }, 'lead');
     context.runtime.claim_and_start({
       task_id: task.id,
       agent_id: 'worker-a',
@@ -304,11 +312,23 @@ describe('Phase 4 E2E patterns 1-5', () => {
     });
 
     const taskA = context.runtime.create_task(
-      { title: 'TASK-A', task_type: 'task', parent_task_id: goal.goal_id, project_id: 'PROJ-001' },
+      {
+        title: 'TASK-A',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        project_id: 'PROJ-001',
+        metadata: { skip_review: true },
+      },
       'lead',
     );
     const taskB = context.runtime.create_task(
-      { title: 'TASK-B', task_type: 'task', parent_task_id: goal.goal_id, project_id: 'PROJ-001' },
+      {
+        title: 'TASK-B',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        project_id: 'PROJ-001',
+        metadata: { skip_review: true },
+      },
       'lead',
     );
     const taskC = context.runtime.create_task(
@@ -316,9 +336,10 @@ describe('Phase 4 E2E patterns 1-5', () => {
       'lead',
     );
 
-    context.runtime.update_task(taskA.id, { status: 'to_do' }, 'lead');
-    context.runtime.update_task(taskB.id, { status: 'to_do' }, 'lead');
-    context.runtime.update_task(taskC.id, { status: 'to_do' }, 'lead');
+    context.runtime.claim_and_start({ task_id: taskB.id, agent_id: 'lead', relay_session_id: 'relay-b-init' });
+    context.runtime.release_task({ task_id: taskB.id, agent_id: 'lead' });
+    context.runtime.claim_and_start({ task_id: taskC.id, agent_id: 'lead', relay_session_id: 'relay-c-init' });
+    context.runtime.release_task({ task_id: taskC.id, agent_id: 'lead' });
 
     context.dependencyResolver.add_dependency({ task_id: taskB.id, depends_on: taskA.id, triggered_by: 'lead' });
     context.dependencyResolver.add_dependency({ task_id: taskC.id, depends_on: taskB.id, triggered_by: 'lead' });
@@ -329,7 +350,6 @@ describe('Phase 4 E2E patterns 1-5', () => {
     const completeA = context.runtime.complete_task({
       task_id: taskA.id,
       agent_id: 'worker-a',
-      skip_review: true,
     });
     expect(completeA.status).toBe('completed');
 
@@ -337,7 +357,7 @@ describe('Phase 4 E2E patterns 1-5', () => {
     expect(nextAfterA?.id).toBe(taskB.id);
 
     context.runtime.claim_and_start({ task_id: taskB.id, agent_id: 'worker-b' });
-    context.runtime.complete_task({ task_id: taskB.id, agent_id: 'worker-b', skip_review: true });
+    context.runtime.complete_task({ task_id: taskB.id, agent_id: 'worker-b' });
 
     const nextAfterB = context.runtime.next_task({ project_id: 'PROJ-001' });
     expect(nextAfterB?.id).toBe(taskC.id);
@@ -364,7 +384,6 @@ describe('Phase 4 E2E patterns 1-5', () => {
       'lead',
     );
 
-    context.runtime.update_task(task.id, { status: 'to_do' }, 'lead');
     context.runtime.claim_and_start({
       task_id: task.id,
       agent_id: 'worker',
@@ -381,15 +400,23 @@ describe('Phase 4 E2E patterns 1-5', () => {
     expect(context.taskManager.getTask(task.id)?.status).toBe('escalated');
 
     expect(() => {
-      context?.runtime.update_task(task.id, { status: 'in_progress' }, 'other');
+      context?.runtime.reopen_task({ task_id: task.id, agent_id: 'other' });
     }).toThrowError(TasksError);
 
-    const resumed = context.runtime.update_task(task.id, { status: 'in_progress' }, 'lead');
-    expect(resumed.status).toBe('in_progress');
+    const resumed = context.runtime.reopen_task({ task_id: task.id, agent_id: 'lead' });
+    expect(resumed.new_status).toBe('to_do');
 
-    context.runtime.update_task(task.id, { status: 'escalated' }, 'worker');
-    const blocked = context.runtime.update_task(task.id, { status: 'blocked' }, 'lead');
-    expect(blocked.status).toBe('blocked');
+    context.runtime.claim_and_start({
+      task_id: task.id,
+      agent_id: 'worker',
+      relay_session_id: 'relay-escalate-2',
+    });
+    const blocked = context.runtime.block_task({
+      task_id: task.id,
+      agent_id: 'worker',
+      reason: 'blocked by external API',
+    });
+    expect(blocked.new_status).toBe('blocked');
     expect(context.lockManager.get_lock(task.id)).toBeNull();
   });
 });

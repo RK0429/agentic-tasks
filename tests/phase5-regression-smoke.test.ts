@@ -18,6 +18,11 @@ describe('Phase 1-4 regression smoke (with Phase 5 runtime)', () => {
       project_id: 'PROJ-001',
       agent_id: 'lead',
     });
+    context.runtime.create_goal({
+      title: 'Open Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'lead',
+    });
 
     const taskA = context.runtime.create_task(
       {
@@ -25,6 +30,7 @@ describe('Phase 1-4 regression smoke (with Phase 5 runtime)', () => {
         task_type: 'task',
         parent_task_id: goal.goal_id,
         project_id: 'PROJ-001',
+        metadata: { skip_review: true },
       },
       'lead',
     );
@@ -46,14 +52,11 @@ describe('Phase 1-4 regression smoke (with Phase 5 runtime)', () => {
       triggered_by: 'lead',
     });
 
-    context.runtime.update_task(taskA.id, { status: 'to_do' }, 'lead');
     context.runtime.claim_and_start({ task_id: taskA.id, agent_id: 'worker-a' });
-    context.runtime.complete_task({ task_id: taskA.id, agent_id: 'worker-a', skip_review: true });
+    context.runtime.complete_task({ task_id: taskA.id, agent_id: 'worker-a' });
 
     const resolution = context.runtime.resolve_dependencies(taskB.id);
     expect(resolution.is_resolved).toBe(true);
-
-    context.runtime.update_task(taskB.id, { status: 'to_do' }, 'lead');
 
     const gate = context.runtime.create_quality_gate(
       {
@@ -83,7 +86,7 @@ describe('Phase 1-4 regression smoke (with Phase 5 runtime)', () => {
       evaluator_backend: 'codex',
     });
 
-    context.runtime.complete_task({ task_id: taskB.id, agent_id: 'worker-b' });
+    context.runtime.approve_task({ task_id: taskB.id, agent_id: 'lead' });
 
     const dashboard = context.runtime.dashboard({ project_id: 'PROJ-001' });
     expect(dashboard.project_id).toBe('PROJ-001');

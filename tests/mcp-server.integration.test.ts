@@ -58,6 +58,10 @@ describe('MCP server integration', () => {
       'claim_and_start',
       'extend_lock',
       'complete_task',
+      'approve_task',
+      'block_task',
+      'reopen_task',
+      'archive_task',
       'escalate_task',
       'delegate_task',
       'create_quality_gate',
@@ -134,16 +138,6 @@ describe('MCP server integration', () => {
     const parentPayload = parseToolText(parentTaskResult);
     const parentTask = parentPayload.task as { id: string };
 
-    const toDoResult = (await client.callTool({
-      name: 'update_task',
-      arguments: {
-        task_id: parentTask.id,
-        status: 'to_do',
-        agent_id: 'lead',
-      },
-    })) as CallToolResult;
-    expect(parseToolText(toDoResult).success).toBe(true);
-
     const claimParent = (await client.callTool({
       name: 'claim_and_start',
       arguments: {
@@ -191,14 +185,24 @@ describe('MCP server integration', () => {
       arguments: {
         task_id: childAId,
         agent_id: 'worker-a',
-        skip_review: true,
       },
     })) as CallToolResult;
 
     const completeAPayload = parseToolText(completeA);
     expect(completeAPayload.success).toBe(true);
     expect(completeAPayload.status).toBe('completed');
-    expect(completeAPayload.new_status).toBe('done');
+    expect(completeAPayload.new_status).toBe('review');
+
+    const approveA = (await client.callTool({
+      name: 'approve_task',
+      arguments: {
+        task_id: childAId,
+        agent_id: 'lead',
+      },
+    })) as CallToolResult;
+    const approveAPayload = parseToolText(approveA);
+    expect(approveAPayload.success).toBe(true);
+    expect(approveAPayload.status).toBe('approved');
 
     const claimB = (await client.callTool({
       name: 'claim_and_start',
@@ -215,14 +219,24 @@ describe('MCP server integration', () => {
       arguments: {
         task_id: childBId,
         agent_id: 'worker-b',
-        skip_review: true,
       },
     })) as CallToolResult;
 
     const completeBPayload = parseToolText(completeB);
     expect(completeBPayload.success).toBe(true);
     expect(completeBPayload.status).toBe('completed');
-    expect(completeBPayload.new_status).toBe('done');
+    expect(completeBPayload.new_status).toBe('review');
+
+    const approveB = (await client.callTool({
+      name: 'approve_task',
+      arguments: {
+        task_id: childBId,
+        agent_id: 'lead',
+      },
+    })) as CallToolResult;
+    const approveBPayload = parseToolText(approveB);
+    expect(approveBPayload.success).toBe(true);
+    expect(approveBPayload.status).toBe('approved');
 
     const subtaskStatus = (await client.callTool({
       name: 'get_subtask_status',

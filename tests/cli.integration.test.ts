@@ -84,11 +84,21 @@ describe('CLI integration', () => {
       dbPath,
       'update',
       task1.task.id,
-      '--status',
-      'to_do',
-    ]) as { task: { status: string } };
+      '--title',
+      'CLI Task 1 Updated',
+    ]) as { task: { title: string } };
 
-    expect(updated.task.status).toBe('to_do');
+    expect(updated.task.title).toBe('CLI Task 1 Updated');
+
+    const archived = runCli([
+      '--db',
+      dbPath,
+      'archive',
+      task1.task.id,
+      '--agent-id',
+      'system',
+    ]) as { new_status: string };
+    expect(archived.new_status).toBe('archived');
 
     const depAdd = runCli([
       '--db',

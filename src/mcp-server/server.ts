@@ -202,14 +202,11 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
   registerTool(
     server,
     'update_task',
-    'Update task fields with access control and quality-gate constraints.',
+    'Update non-status task fields with access control.',
     {
       task_id: z.string(),
       title: z.string().optional(),
       description: z.string().optional(),
-      status: z
-        .enum(['backlog', 'to_do', 'in_progress', 'review', 'done', 'blocked', 'escalated', 'archived'])
-        .optional(),
       priority: z.enum(['critical', 'high', 'medium', 'low']).optional(),
       sprint_id: z.string().nullable().optional(),
       assignee: z.string().nullable().optional(),
@@ -252,16 +249,6 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
           {
             title: input.title as string | undefined,
             description: input.description as string | undefined,
-            status: input.status as
-              | 'backlog'
-              | 'to_do'
-              | 'in_progress'
-              | 'review'
-              | 'done'
-              | 'blocked'
-              | 'escalated'
-              | 'archived'
-              | undefined,
             priority: input.priority as 'critical' | 'high' | 'medium' | 'low' | undefined,
             sprint_id: (input.sprint_id as string | null | undefined) ?? undefined,
             assignee: (input.assignee as string | null | undefined) ?? undefined,
@@ -857,9 +844,56 @@ export function createMcpServer(options: CreateMcpServerOptions = {}): {
       agent_id: z.string(),
       actual_effort_ms: z.number().int().optional(),
       result_summary: z.string().optional(),
-      skip_review: z.boolean().default(false),
     },
     (input) => runtime.complete_task(input as never),
+  );
+
+  registerTool(
+    server,
+    'approve_task',
+    'Approve a reviewed task to mark it as done. Only task creator or parent assignee can approve (self-review prohibited).',
+    {
+      task_id: z.string(),
+      agent_id: z.string(),
+      result_summary: z.string().optional(),
+    },
+    (input) => runtime.approve_task(input as never),
+  );
+
+  registerTool(
+    server,
+    'block_task',
+    'Block an in-progress task (assignee only).',
+    {
+      task_id: z.string(),
+      agent_id: z.string(),
+      reason: z.string(),
+      blocked_by: z.string().optional(),
+    },
+    (input) => runtime.block_task(input as never),
+  );
+
+  registerTool(
+    server,
+    'reopen_task',
+    'Reopen a review/blocked/escalated task back to to_do.',
+    {
+      task_id: z.string(),
+      agent_id: z.string(),
+      reason: z.string().optional(),
+    },
+    (input) => runtime.reopen_task(input as never),
+  );
+
+  registerTool(
+    server,
+    'archive_task',
+    'Archive a task and cascade archive descendants (creator only).',
+    {
+      task_id: z.string(),
+      agent_id: z.string(),
+    },
+    (input) => runtime.archive_task(input as never),
   );
 
   registerTool(

@@ -20,7 +20,13 @@ describe('dashboard goal view', () => {
     });
 
     const t1 = context.runtime.create_task(
-      { title: 'T1', task_type: 'task', parent_task_id: goal.goal_id, project_id: 'PROJ-001' },
+      {
+        title: 'T1',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        project_id: 'PROJ-001',
+        metadata: { skip_review: true },
+      },
       'lead',
     );
     const t2 = context.runtime.create_task(
@@ -32,15 +38,17 @@ describe('dashboard goal view', () => {
       'lead',
     );
 
-    context.runtime.update_task(t1.id, { status: 'to_do' }, 'lead');
     context.runtime.claim_and_start({ task_id: t1.id, agent_id: 'worker-1' });
-    context.runtime.complete_task({ task_id: t1.id, agent_id: 'worker-1', skip_review: true });
+    context.runtime.complete_task({ task_id: t1.id, agent_id: 'worker-1' });
 
-    context.runtime.update_task(t2.id, { status: 'to_do' }, 'lead');
     context.runtime.claim_and_start({ task_id: t2.id, agent_id: 'worker-2' });
 
-    context.runtime.update_task(t3.id, { status: 'to_do' }, 'lead');
-    context.runtime.update_task(t3.id, { status: 'blocked' }, 'lead');
+    context.runtime.claim_and_start({ task_id: t3.id, agent_id: 'worker-3' });
+    context.runtime.block_task({
+      task_id: t3.id,
+      agent_id: 'worker-3',
+      reason: 'blocked on dependency',
+    });
 
     const gateDone = context.runtime.create_quality_gate(
       {

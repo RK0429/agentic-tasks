@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-03-05
+
+### Added
+
+- `approve_task` API: review → done (created_by/parent assignee only, self-review prohibited)
+- `block_task` API: in_progress → blocked (assignee only, lock release)
+- `reopen_task` API: review/blocked/escalated → to_do (created_by/parent assignee)
+- `archive_task` API: → archived with cascade (created_by only)
+- Auto-cleanup: delete child tasks when all done under a goal, delete project when all goals done
+- Cleanup summary in `approve_task` response with task/effort aggregation
+- Goal `assignee` auto-set to `agent_id` on `create_goal`
+- CLI commands: `approve`, `block`, `reopen`, `archive`
+
+### Changed
+
+- `complete_task`: now only transitions `in_progress → review` (or `done` if metadata.skip_review)
+- `update_task`: status field removed — use dedicated transition APIs instead
+
+### Removed
+
+- `status` parameter from `update_task` (BREAKING)
+- `skip_review` parameter from `complete_task` (moved to task metadata)
+
 ## [0.1.7] - 2026-03-05
 
 ### Fixed

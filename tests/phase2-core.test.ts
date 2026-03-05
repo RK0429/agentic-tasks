@@ -11,7 +11,7 @@ describe('Phase 2 core features', () => {
     context = undefined;
   });
 
-  it('enforces WIP limit on claim_and_start / assign_task / update_task(in_progress)', () => {
+  it('enforces WIP limit on claim_and_start / assign_task', () => {
     context = createTestContext();
 
     context.db.prepare('UPDATE projects SET wip_limit = 1 WHERE id = ?').run('PROJ-001');
@@ -41,9 +41,6 @@ describe('Phase 2 core features', () => {
       'owner',
     );
 
-    context.runtime.update_task(t1.id, { status: 'to_do' }, 'owner');
-    context.runtime.update_task(t2.id, { status: 'to_do' }, 'owner');
-
     context.runtime.claim_and_start({ task_id: t1.id, agent_id: 'coder-1' });
 
     expect(() => {
@@ -68,10 +65,8 @@ describe('Phase 2 core features', () => {
       'owner',
     );
 
-    context.runtime.update_task(t3.id, { status: 'to_do' }, 'owner');
-
     expect(() => {
-      context?.runtime.update_task(t3.id, { status: 'in_progress' }, 'owner');
+      context?.runtime.claim_and_start({ task_id: t3.id, agent_id: 'owner' });
     }).toThrowError(TasksError);
 
     const latestEvent = context.db
@@ -175,17 +170,14 @@ describe('Phase 2 core features', () => {
       'owner',
     );
 
-    context.runtime.update_task(doneTask.id, { status: 'to_do' }, 'owner');
-    context.runtime.update_task(doneTask.id, { status: 'in_progress' }, 'owner');
-    context.runtime.update_task(doneTask.id, { status: 'review' }, 'owner');
-    context.runtime.update_task(doneTask.id, { status: 'done' }, 'owner');
+    context.runtime.claim_and_start({ task_id: doneTask.id, agent_id: 'worker-done' });
+    context.runtime.complete_task({ task_id: doneTask.id, agent_id: 'worker-done' });
+    context.runtime.approve_task({ task_id: doneTask.id, agent_id: 'owner' });
 
-    context.runtime.update_task(reviewTask.id, { status: 'to_do' }, 'owner');
-    context.runtime.update_task(reviewTask.id, { status: 'in_progress' }, 'owner');
-    context.runtime.update_task(reviewTask.id, { status: 'review' }, 'owner');
+    context.runtime.claim_and_start({ task_id: reviewTask.id, agent_id: 'worker-review' });
+    context.runtime.complete_task({ task_id: reviewTask.id, agent_id: 'worker-review' });
 
-    context.runtime.update_task(inProgressTask.id, { status: 'to_do' }, 'owner');
-    context.runtime.update_task(inProgressTask.id, { status: 'in_progress' }, 'owner');
+    context.runtime.claim_and_start({ task_id: inProgressTask.id, agent_id: 'worker-progress' });
 
     const progress = context.taskManager.getGoalProgressPercent(goal.goal_id);
 
@@ -298,7 +290,6 @@ describe('Phase 2 core features', () => {
       'owner',
     );
 
-    context.runtime.update_task(task.id, { status: 'to_do' }, 'owner');
     context.runtime.claim_and_start({
       task_id: task.id,
       agent_id: 'worker',
@@ -345,7 +336,6 @@ describe('Phase 2 core features', () => {
       'lead',
     );
 
-    context.runtime.update_task(task.id, { status: 'to_do' }, 'lead');
     context.runtime.claim_and_start({
       task_id: task.id,
       agent_id: 'worker',
@@ -369,14 +359,191 @@ describe('Phase 2 core features', () => {
     });
 
     expect(() => {
-      context?.runtime.update_task(task.id, { status: 'in_progress' }, 'worker');
+      context?.runtime.reopen_task({ task_id: task.id, agent_id: 'worker' });
     }).toThrowError(TasksError);
 
-    const reopened = context.runtime.update_task(task.id, { status: 'in_progress' }, 'lead');
-    expect(reopened.status).toBe('in_progress');
+    const reopened = context.runtime.reopen_task({ task_id: task.id, agent_id: 'lead' });
+    expect(reopened.new_status).toBe('to_do');
 
-    context.runtime.update_task(task.id, { status: 'escalated' }, 'worker');
-    const blocked = context.runtime.update_task(task.id, { status: 'blocked' }, 'lead');
-    expect(blocked.status).toBe('blocked');
+    context.runtime.claim_and_start({
+      task_id: task.id,
+      agent_id: 'worker',
+      relay_session_id: 'relay-2',
+    });
+    const blocked = context.runtime.block_task({
+      task_id: task.id,
+      agent_id: 'worker',
+      reason: 'need parent decision',
+    });
+    expect(blocked.new_status).toBe('blocked');
+  });
+
+  it('sets goal assignee automatically from create_goal agent_id', () => {
+    context = createTestContext();
+
+    const goal = context.runtime.create_goal({
+      title: 'Auto Assignee Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'goal-owner',
+    });
+
+    const stored = context.taskManager.getTask(goal.goal_id);
+    expect(stored?.assignee).toBe('goal-owner');
+  });
+
+  it('rejects self-approval on approve_task', () => {
+    context = createTestContext();
+
+    const goal = context.runtime.create_goal({
+      title: 'Approval Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'lead',
+    });
+
+    const task = context.runtime.create_task(
+      {
+        title: 'Needs Review',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        project_id: 'PROJ-001',
+      },
+      'lead',
+    );
+
+    context.runtime.claim_and_start({ task_id: task.id, agent_id: 'worker' });
+    context.runtime.complete_task({ task_id: task.id, agent_id: 'worker' });
+
+    expect(() => {
+      context?.runtime.approve_task({ task_id: task.id, agent_id: 'worker' });
+    }).toThrowError(TasksError);
+
+    const approved = context.runtime.approve_task({ task_id: task.id, agent_id: 'lead' });
+    expect(approved.status).toBe('approved');
+  });
+
+  it('supports block_task / reopen_task / archive_task transitions', () => {
+    context = createTestContext();
+
+    const goal = context.runtime.create_goal({
+      title: 'Transition Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'lead',
+    });
+
+    const task = context.runtime.create_task(
+      {
+        title: 'Transition Task',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        project_id: 'PROJ-001',
+      },
+      'lead',
+    );
+
+    context.runtime.claim_and_start({ task_id: task.id, agent_id: 'worker' });
+    const blocked = context.runtime.block_task({
+      task_id: task.id,
+      agent_id: 'worker',
+      reason: 'waiting for input',
+    });
+    expect(blocked.new_status).toBe('blocked');
+    expect(context.lockManager.get_lock(task.id)).toBeNull();
+
+    const reopened = context.runtime.reopen_task({
+      task_id: task.id,
+      agent_id: 'lead',
+      reason: 'clarified',
+    });
+    expect(reopened.new_status).toBe('to_do');
+
+    const archived = context.runtime.archive_task({
+      task_id: task.id,
+      agent_id: 'lead',
+    });
+    expect(archived.new_status).toBe('archived');
+  });
+
+  it('auto-cleans goal tasks when all tasks are done/archived', () => {
+    context = createTestContext();
+
+    const goal = context.runtime.create_goal({
+      title: 'Cleanup Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'lead',
+    });
+    context.runtime.create_goal({
+      title: 'Open Goal',
+      project_id: 'PROJ-001',
+      agent_id: 'lead',
+    });
+
+    const task1 = context.runtime.create_task(
+      {
+        title: 'Cleanup Task 1',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        project_id: 'PROJ-001',
+      },
+      'lead',
+    );
+    const task2 = context.runtime.create_task(
+      {
+        title: 'Cleanup Task 2',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        project_id: 'PROJ-001',
+      },
+      'lead',
+    );
+
+    context.runtime.claim_and_start({ task_id: task1.id, agent_id: 'worker-1' });
+    context.runtime.complete_task({ task_id: task1.id, agent_id: 'worker-1' });
+    context.runtime.approve_task({ task_id: task1.id, agent_id: 'lead' });
+
+    context.runtime.claim_and_start({ task_id: task2.id, agent_id: 'worker-2' });
+    context.runtime.complete_task({ task_id: task2.id, agent_id: 'worker-2' });
+    const approved = context.runtime.approve_task({ task_id: task2.id, agent_id: 'lead' });
+
+    expect(approved.cleanup?.goal_cleaned?.goal_id).toBe(goal.goal_id);
+    expect(approved.cleanup?.goal_cleaned?.tasks_deleted).toEqual(
+      expect.arrayContaining([task1.id, task2.id]),
+    );
+
+    const remaining = context.taskManager.listTasks({ goal_id: goal.goal_id, task_type: 'task' });
+    expect(remaining).toHaveLength(0);
+    expect(context.taskManager.getTask(goal.goal_id)?.status).toBe('done');
+  });
+
+  it('auto-cleans project when all goals are completed', () => {
+    context = createTestContext();
+
+    const project = context.runtime.create_project({
+      name: 'Auto Cleanup Project',
+    }).project;
+
+    const goal = context.runtime.create_goal({
+      title: 'Only Goal',
+      project_id: project.id,
+      agent_id: 'lead',
+    });
+    const task = context.runtime.create_task(
+      {
+        title: 'Only Task',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        project_id: project.id,
+      },
+      'lead',
+    );
+
+    context.runtime.claim_and_start({ task_id: task.id, agent_id: 'worker' });
+    context.runtime.complete_task({ task_id: task.id, agent_id: 'worker' });
+    const approved = context.runtime.approve_task({ task_id: task.id, agent_id: 'lead' });
+
+    expect(approved.cleanup?.project_cleaned?.project_id).toBe(project.id);
+    expect(context.taskManager.getTask(goal.goal_id)).toBeNull();
+    expect(() => {
+      context?.runtime.get_project(project.id);
+    }).toThrowError(TasksError);
   });
 });

@@ -55,7 +55,6 @@ interface TaskCreateCommandOptions {
 interface TaskUpdateCommandOptions {
   title?: string;
   description?: string;
-  status?: TaskStatus;
   priority?: TaskPriority;
   sprintId?: string;
   assignee?: string;
@@ -83,6 +82,26 @@ interface DependencyAddCommandOptions {
   taskId: string;
   dependsOn: string;
   type?: DependencyType;
+}
+
+interface TaskApproveCommandOptions {
+  agentId?: string;
+  resultSummary?: string;
+}
+
+interface TaskBlockCommandOptions {
+  agentId?: string;
+  reason: string;
+  blockedBy?: string;
+}
+
+interface TaskReopenCommandOptions {
+  agentId?: string;
+  reason?: string;
+}
+
+interface TaskArchiveCommandOptions {
+  agentId?: string;
 }
 
 function parseJson(value: string | undefined, fieldName: string): unknown {
@@ -172,7 +191,6 @@ function configureTaskUpdateCommand(command: Command): Command {
   return command
     .option('--title <title>', 'title')
     .option('--description <description>', 'description')
-    .option('--status <status>', 'status')
     .option('--priority <priority>', 'priority')
     .option('--sprint-id <sprint_id>', 'sprint_id')
     .option('--assignee <assignee>', 'assignee')
@@ -245,7 +263,6 @@ function runTaskUpdate(db_path: string, id: string, options: TaskUpdateCommandOp
     const updates = {
       title: options.title,
       description: options.description,
-      status: options.status as TaskStatus | undefined,
       priority: options.priority,
       sprint_id: options.sprintId,
       assignee: options.assignee,
@@ -259,6 +276,66 @@ function runTaskUpdate(db_path: string, id: string, options: TaskUpdateCommandOp
 
     const task = context.runtime.update_task(id, updates, options.agentId ?? 'system');
     printResult({ success: true, task });
+  } finally {
+    context.close();
+  }
+}
+
+function runTaskApprove(db_path: string, id: string, options: TaskApproveCommandOptions): void {
+  const context = createContext(db_path);
+
+  try {
+    const result = context.runtime.approve_task({
+      task_id: id,
+      agent_id: options.agentId ?? 'system',
+      result_summary: options.resultSummary,
+    });
+    printResult({ success: true, ...result });
+  } finally {
+    context.close();
+  }
+}
+
+function runTaskBlock(db_path: string, id: string, options: TaskBlockCommandOptions): void {
+  const context = createContext(db_path);
+
+  try {
+    const result = context.runtime.block_task({
+      task_id: id,
+      agent_id: options.agentId ?? 'system',
+      reason: options.reason,
+      blocked_by: options.blockedBy,
+    });
+    printResult({ success: true, ...result });
+  } finally {
+    context.close();
+  }
+}
+
+function runTaskReopen(db_path: string, id: string, options: TaskReopenCommandOptions): void {
+  const context = createContext(db_path);
+
+  try {
+    const result = context.runtime.reopen_task({
+      task_id: id,
+      agent_id: options.agentId ?? 'system',
+      reason: options.reason,
+    });
+    printResult({ success: true, ...result });
+  } finally {
+    context.close();
+  }
+}
+
+function runTaskArchive(db_path: string, id: string, options: TaskArchiveCommandOptions): void {
+  const context = createContext(db_path);
+
+  try {
+    const result = context.runtime.archive_task({
+      task_id: id,
+      agent_id: options.agentId ?? 'system',
+    });
+    printResult({ success: true, ...result });
   } finally {
     context.close();
   }
@@ -552,6 +629,46 @@ Examples:
       } finally {
         context.close();
       }
+    });
+
+  program
+    .command('approve <task-id>')
+    .description('レビュー済みタスクを承認して done にする')
+    .option('--result-summary <result_summary>', 'result_summary')
+    .option('--agent-id <agent_id>', 'agent_id', 'system')
+    .action(function action(taskId: string, options) {
+      const db_path = resolveDbPath(this);
+      runTaskApprove(db_path, taskId, options as TaskApproveCommandOptions);
+    });
+
+  program
+    .command('block <task-id>')
+    .description('in_progress タスクを blocked にする')
+    .requiredOption('--reason <reason>', 'reason')
+    .option('--blocked-by <blocked_by>', 'blocked_by task id')
+    .option('--agent-id <agent_id>', 'agent_id', 'system')
+    .action(function action(taskId: string, options) {
+      const db_path = resolveDbPath(this);
+      runTaskBlock(db_path, taskId, options as TaskBlockCommandOptions);
+    });
+
+  program
+    .command('reopen <task-id>')
+    .description('review/blocked/escalated タスクを to_do に戻す')
+    .option('--reason <reason>', 'reason')
+    .option('--agent-id <agent_id>', 'agent_id', 'system')
+    .action(function action(taskId: string, options) {
+      const db_path = resolveDbPath(this);
+      runTaskReopen(db_path, taskId, options as TaskReopenCommandOptions);
+    });
+
+  program
+    .command('archive <task-id>')
+    .description('タスクを archived にし配下も連鎖アーカイブ')
+    .option('--agent-id <agent_id>', 'agent_id', 'system')
+    .action(function action(taskId: string, options) {
+      const db_path = resolveDbPath(this);
+      runTaskArchive(db_path, taskId, options as TaskArchiveCommandOptions);
     });
 
   const project = program.command('project').description('プロジェクト操作');

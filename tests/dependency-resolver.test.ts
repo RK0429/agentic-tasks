@@ -48,7 +48,7 @@ describe('DependencyResolver', () => {
     expect(sorted.indexOf(t2.id)).toBeLessThan(sorted.indexOf(t3.id));
 
     expect(context.dependencyResolver.are_dependencies_resolved(t2.id)).toBe(false);
-    context.taskManager.updateTask(t1.id, { status: 'archived' });
+    context.runtime.archive_task({ task_id: t1.id, agent_id: 'system' });
     expect(context.dependencyResolver.are_dependencies_resolved(t2.id)).toBe(true);
   });
 

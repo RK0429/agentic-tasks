@@ -1,11 +1,11 @@
 import Database from 'better-sqlite3';
 
 import { AccessControl } from './access-control.js';
-import { DependencyResolver } from './dependency-resolver.js';
 import { EventEmitter } from './event-emitter.js';
 import { TasksError } from './errors.js';
 import { IdGenerator } from './id-generator.js';
-import { QualityGateManager } from './quality-gate-manager.js';
+import type { DependencyResolver } from './dependency-resolver.js';
+import type { QualityGateManager } from './quality-gate-manager.js';
 import type {
   AcceptanceCriterion,
   CreateTaskInput,
@@ -16,17 +16,6 @@ import type {
   TaskType,
   UpdateTaskInput,
 } from '../types/index.js';
-
-const VALID_TRANSITIONS: Record<TaskStatus, ReadonlyArray<TaskStatus>> = {
-  backlog: ['to_do', 'in_progress', 'archived'],
-  to_do: ['in_progress', 'blocked', 'archived'],
-  in_progress: ['review', 'done', 'escalated', 'blocked', 'to_do', 'archived'],
-  review: ['done', 'in_progress', 'archived'],
-  done: [],
-  blocked: ['to_do', 'archived'],
-  escalated: ['in_progress', 'blocked', 'archived'],
-  archived: [],
-};
 
 const EFFORT_TO_MS: Record<ExpectedEffort, number> = {
   XS: 1_800_000,
@@ -121,8 +110,6 @@ export class TaskManager {
   private readonly accessControl: AccessControl;
   private readonly idGenerator: IdGenerator;
   private readonly eventEmitter: EventEmitter;
-  private readonly qualityGateManager: QualityGateManager;
-  private readonly dependencyResolver: DependencyResolver;
 
   public constructor(db: Database.Database, deps: TaskManagerDependencies = {}) {
     this.db = db;
@@ -130,10 +117,6 @@ export class TaskManager {
     this.accessControl = deps.access_control ?? new AccessControl(db);
     this.eventEmitter = deps.event_emitter ?? new EventEmitter(db);
     this.idGenerator = deps.id_generator ?? new IdGenerator(db);
-    this.qualityGateManager =
-      deps.quality_gate_manager ?? new QualityGateManager(db, this.idGenerator, this.eventEmitter);
-    this.dependencyResolver =
-      deps.dependency_resolver ?? new DependencyResolver(db, this.eventEmitter);
   }
 
   public createTask(input: CreateTaskInput, triggered_by = 'system'): Task {
@@ -358,42 +341,6 @@ export class TaskManager {
       );
     }
 
-    const nextStatus = input.status ?? current.status;
-    this.validateTransition(current.status, nextStatus);
-
-    if (current.status !== nextStatus) {
-      if (nextStatus === 'in_progress' && !WIP_STATUSES.includes(current.status)) {
-        if (!this.dependencyResolver.are_dependencies_resolved(task_id)) {
-          throw new TasksError('dependency_not_resolved', 'unresolved dependencies block in_progress');
-        }
-
-        this.ensureProjectWipLimit(current.project_id, task_id, triggered_by);
-      }
-
-      if (current.status === 'in_progress' && nextStatus === 'escalated') {
-        this.accessControl.ensure_task_action('escalate_task', task_id, agent_id);
-        this.ensureLockHolder(task_id, agent_id);
-      }
-
-      if (
-        current.status === 'escalated' &&
-        (nextStatus === 'in_progress' || nextStatus === 'blocked')
-      ) {
-        this.accessControl.ensure_parent_assignee(task_id, agent_id);
-      }
-
-      if (nextStatus === 'done') {
-        this.ensureChildrenComplete(task_id);
-        if (current.status === 'review') {
-          this.qualityGateManager.assert_review_to_done_allowed(task_id, triggered_by);
-        }
-      }
-
-      if (nextStatus === 'archived') {
-        this.archiveDescendants(task_id, triggered_by);
-      }
-    }
-
     const acceptanceCriteria = Object.prototype.hasOwnProperty.call(input, 'acceptance_criteria')
       ? normalizeAcceptanceCriteria(input.acceptance_criteria)
       : current.acceptance_criteria;
@@ -407,7 +354,6 @@ export class TaskManager {
           UPDATE tasks
           SET title = ?,
               description = ?,
-              status = ?,
               priority = ?,
               sprint_id = ?,
               assignee = ?,
@@ -425,7 +371,6 @@ export class TaskManager {
         .run(
           input.title ?? current.title,
           input.description ?? current.description,
-          nextStatus,
           input.priority ?? current.priority,
           Object.prototype.hasOwnProperty.call(input, 'sprint_id')
             ? input.sprint_id ?? null
@@ -461,42 +406,9 @@ export class TaskManager {
         },
         triggered_by,
       });
-
-      if (current.status !== nextStatus) {
-        this.eventEmitter.emit_task_event({
-          task_id,
-          event_type: 'status_changed',
-          data: {
-            from: current.status,
-            to: nextStatus,
-          },
-          triggered_by,
-        });
-      }
-
-      if (current.status === 'escalated' && nextStatus === 'blocked') {
-        const lock = this.db
-          .prepare('SELECT task_id, agent_id FROM task_locks WHERE task_id = ? LIMIT 1')
-          .get(task_id) as { task_id: string; agent_id: string } | undefined;
-
-        if (lock) {
-          this.db.prepare('DELETE FROM task_locks WHERE task_id = ?').run(task_id);
-          this.eventEmitter.emit_task_event({
-            task_id,
-            event_type: 'unlocked',
-            data: {
-              released_by: triggered_by,
-              reason: 'escalated_to_blocked',
-            },
-            triggered_by,
-          });
-        }
-      }
     });
 
     tx();
-
-    this.refreshGoalStatus(task_id, triggered_by);
 
     const updated = this.getTask(task_id);
     if (!updated) {
@@ -598,19 +510,6 @@ export class TaskManager {
     }
 
     return roundsToTwoDecimals(this.computeNodeCompletion(goal_id) * 100);
-  }
-
-  private validateTransition(from: TaskStatus, to: TaskStatus): void {
-    if (from === to) {
-      return;
-    }
-
-    if (!VALID_TRANSITIONS[from].includes(to)) {
-      throw new TasksError('invalid_transition', `invalid status transition: ${from} -> ${to}`, {
-        from,
-        to,
-      });
-    }
   }
 
   private resolveHierarchy(
@@ -759,143 +658,6 @@ export class TaskManager {
         limit: project.wip_limit,
       });
     }
-  }
-
-  private ensureChildrenComplete(task_id: string): void {
-    const incompleteChildren = this.db
-      .prepare(
-        `
-        SELECT id
-        FROM tasks
-        WHERE parent_task_id = ?
-          AND task_type = 'task'
-          AND status NOT IN ('done', 'archived')
-        ORDER BY id
-        `,
-      )
-      .all(task_id) as Array<{ id: string }>;
-
-    if (incompleteChildren.length > 0) {
-      throw new TasksError(
-        'children_not_complete',
-        'Child tasks must be done or archived before completing parent task',
-        {
-          incomplete_children: incompleteChildren.map((child) => child.id),
-        },
-      );
-    }
-  }
-
-  private ensureLockHolder(task_id: string, agent_id: string): void {
-    if (isSystemActor(agent_id)) {
-      return;
-    }
-
-    const lock = this.db
-      .prepare('SELECT agent_id FROM task_locks WHERE task_id = ? LIMIT 1')
-      .get(task_id) as { agent_id: string } | undefined;
-
-    if (!lock || lock.agent_id !== agent_id) {
-      throw new TasksError('lock_owner_mismatch', 'lock owned by another agent', {
-        task_id,
-        lock_holder: lock?.agent_id ?? null,
-        requested_by: agent_id,
-      });
-    }
-  }
-
-  private archiveDescendants(task_id: string, triggered_by: string): void {
-    const descendants = this.db
-      .prepare(
-        `
-        WITH RECURSIVE descendants AS (
-          SELECT id, status FROM tasks WHERE parent_task_id = ?
-          UNION ALL
-          SELECT t.id, t.status
-          FROM tasks t
-          INNER JOIN descendants d ON t.parent_task_id = d.id
-        )
-        SELECT id, status FROM descendants
-        `,
-      )
-      .all(task_id) as Array<{ id: string; status: TaskStatus }>;
-
-    const inProgress = descendants.filter((descendant) => descendant.status === 'in_progress');
-    if (inProgress.length > 0) {
-      throw new TasksError('descendant_in_progress', 'cannot archive while descendant is in_progress', {
-        blocking_task_ids: inProgress.map((node) => node.id),
-      });
-    }
-
-    const now = nowIso();
-    for (const descendant of descendants) {
-      if (descendant.status === 'archived') {
-        continue;
-      }
-
-      this.db
-        .prepare('UPDATE tasks SET status = ?, version = version + 1, updated_at = ? WHERE id = ?')
-        .run('archived', now, descendant.id);
-
-      this.eventEmitter.emit_task_event({
-        task_id: descendant.id,
-        event_type: 'status_changed',
-        data: {
-          from: descendant.status,
-          to: 'archived',
-          reason: 'cascade_archive',
-          root_task_id: task_id,
-        },
-        triggered_by,
-      });
-    }
-  }
-
-  private refreshGoalStatus(task_id: string, triggered_by: string): void {
-    const task = this.getTask(task_id);
-    if (!task || !task.goal_id || task.id === task.goal_id) {
-      return;
-    }
-
-    const children = this.db
-      .prepare(
-        `
-        SELECT id, status
-        FROM tasks
-        WHERE parent_task_id = ?
-          AND task_type = 'task'
-        `,
-      )
-      .all(task.goal_id) as Array<{ id: string; status: TaskStatus }>;
-
-    if (children.length === 0) {
-      return;
-    }
-
-    const allDone = children.every((child) => child.status === 'done' || child.status === 'archived');
-    if (!allDone) {
-      return;
-    }
-
-    const goal = this.getTask(task.goal_id);
-    if (!goal || goal.status === 'review' || goal.status === 'done' || goal.status === 'archived') {
-      return;
-    }
-
-    this.db
-      .prepare('UPDATE tasks SET status = ?, updated_at = ?, version = version + 1 WHERE id = ?')
-      .run('review', nowIso(), goal.id);
-
-    this.eventEmitter.emit_task_event({
-      task_id: goal.id,
-      event_type: 'status_changed',
-      data: {
-        from: goal.status,
-        to: 'review',
-        reason: 'all_children_done',
-      },
-      triggered_by,
-    });
   }
 
   private computeNodeCompletion(task_id: string): number {

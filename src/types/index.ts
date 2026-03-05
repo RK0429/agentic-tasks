@@ -163,7 +163,6 @@ export interface CreateTaskInput {
 export interface UpdateTaskInput {
   title?: string;
   description?: string;
-  status?: TaskStatus;
   priority?: TaskPriority;
   sprint_id?: string | null;
   assignee?: string | null;

@@ -5,6 +5,10 @@ import { TasksError } from './errors.js';
 type TaskAction =
   | 'claim_and_start'
   | 'complete_task'
+  | 'approve_task'
+  | 'block_task'
+  | 'reopen_task'
+  | 'archive_task'
   | 'escalate_task'
   | 'update_task'
   | 'delete_task'
@@ -44,6 +48,7 @@ export class AccessControl {
 
     switch (action) {
       case 'complete_task':
+      case 'block_task':
       case 'escalate_task':
       case 'release_task':
       case 'decompose_task': {
@@ -53,6 +58,66 @@ export class AccessControl {
             task_id,
             agent_id,
             assignee: task.assignee,
+          });
+        }
+        return;
+      }
+      case 'approve_task': {
+        if (task.assignee === agent_id) {
+          throw new TasksError(
+            'access_denied',
+            'assignee cannot approve own task (self-review prohibited)',
+            {
+              action,
+              task_id,
+              agent_id,
+            },
+          );
+        }
+        if (task.created_by !== agent_id) {
+          const parent = task.parent_task_id ? this.get_task(task.parent_task_id) : null;
+          if (!parent || parent.assignee !== agent_id) {
+            throw new TasksError(
+              'access_denied',
+              'only creator or parent assignee can approve task',
+              {
+                action,
+                task_id,
+                agent_id,
+                created_by: task.created_by,
+                parent_task_id: task.parent_task_id,
+                parent_assignee: parent?.assignee ?? null,
+              },
+            );
+          }
+        }
+        return;
+      }
+      case 'reopen_task': {
+        const parent = task.parent_task_id ? this.get_task(task.parent_task_id) : null;
+        if (task.created_by !== agent_id && parent?.assignee !== agent_id) {
+          throw new TasksError(
+            'access_denied',
+            'only creator or parent assignee can reopen task',
+            {
+              action,
+              task_id,
+              agent_id,
+              created_by: task.created_by,
+              parent_task_id: task.parent_task_id,
+              parent_assignee: parent?.assignee ?? null,
+            },
+          );
+        }
+        return;
+      }
+      case 'archive_task': {
+        if (task.created_by !== agent_id) {
+          throw new TasksError('access_denied', 'only creator can archive task', {
+            action,
+            task_id,
+            agent_id,
+            created_by: task.created_by,
           });
         }
         return;
@@ -157,4 +222,3 @@ export class AccessControl {
     return row;
   }
 }
-

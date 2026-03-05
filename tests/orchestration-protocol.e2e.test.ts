@@ -30,7 +30,6 @@ describe('Orchestration Protocol E2E', () => {
       'orchestrator',
     );
 
-    context.runtime.update_task(parent.id, { status: 'to_do' }, 'orchestrator');
     context.runtime.claim_and_start({
       task_id: parent.id,
       agent_id: 'specialist',
@@ -63,7 +62,8 @@ describe('Orchestration Protocol E2E', () => {
     });
 
     expect(delegated1.assigned_to).toBe('worker-1');
-    context.runtime.complete_task({ task_id: child1, agent_id: 'worker-1', skip_review: true });
+    context.runtime.complete_task({ task_id: child1, agent_id: 'worker-1' });
+    context.runtime.approve_task({ task_id: child1, agent_id: 'specialist' });
 
     const delegated2 = context.runtime.delegate_task({
       task_id: child2,
@@ -75,7 +75,8 @@ describe('Orchestration Protocol E2E', () => {
     });
 
     expect(delegated2.assigned_to).toBe('worker-2');
-    context.runtime.complete_task({ task_id: child2, agent_id: 'worker-2', skip_review: true });
+    context.runtime.complete_task({ task_id: child2, agent_id: 'worker-2' });
+    context.runtime.approve_task({ task_id: child2, agent_id: 'specialist' });
 
     const status = context.runtime.get_subtask_status({ parent_task_id: parent.id, include_escalated: true });
     expect(status.summary.by_status.done).toBe(2);
@@ -101,8 +102,16 @@ describe('Orchestration Protocol E2E', () => {
       },
       'lead',
     );
+    context.runtime.create_task(
+      {
+        title: 'Open Task',
+        task_type: 'task',
+        parent_task_id: goal.goal_id,
+        project_id: 'PROJ-001',
+      },
+      'lead',
+    );
 
-    context.runtime.update_task(task.id, { status: 'to_do' }, 'lead');
     context.runtime.claim_and_start({ task_id: task.id, agent_id: 'maker', relay_session_id: 'relay-maker' });
 
     const gate = context.runtime.create_quality_gate(
@@ -140,7 +149,7 @@ describe('Orchestration Protocol E2E', () => {
     });
 
     expect(() => {
-      context?.runtime.update_task(task.id, { status: 'done' }, 'maker');
+      context?.runtime.approve_task({ task_id: task.id, agent_id: 'lead' });
     }).toThrowError(TasksError);
 
     context.runtime.evaluate_quality_gate({
@@ -151,8 +160,8 @@ describe('Orchestration Protocol E2E', () => {
       feedback: 'approved',
     });
 
-    const done = context.runtime.update_task(task.id, { status: 'done' }, 'maker');
-    expect(done.status).toBe('done');
+    const done = context.runtime.approve_task({ task_id: task.id, agent_id: 'lead' });
+    expect(done.status).toBe('approved');
 
     const checkpoint = context.runtime.create_checkpoint({
       project_id: 'PROJ-001',

@@ -127,20 +127,21 @@ describe('TaskManager', () => {
     }).toThrowError(TasksError);
   });
 
-  it('validates status transitions and quality gate enforcement', () => {
+  it('enforces approve_task quality gate and acceptance criteria', () => {
     context = createTestContext();
 
-    const goal = context.taskManager.createTask({
+    const goal = context.runtime.create_goal({
       title: 'Goal',
-      task_type: 'goal',
       project_id: 'PROJ-001',
+      agent_id: 'lead',
     });
 
-    const task = context.taskManager.createTask({
+    const task = context.runtime.create_task(
+      {
       title: 'Task',
       task_type: 'task',
-      parent_task_id: goal.id,
-      project_id: goal.project_id,
+      parent_task_id: goal.goal_id,
+      project_id: 'PROJ-001',
       acceptance_criteria: [
         {
           id: 'AC-001',
@@ -151,15 +152,13 @@ describe('TaskManager', () => {
           verified_at: null,
         },
       ],
-    });
+      },
+      'lead',
+    );
 
-    expect(() => {
-      context?.taskManager.updateTask(task.id, { status: 'done' });
-    }).toThrowError(TasksError);
-
-    context.taskManager.updateTask(task.id, { status: 'to_do' });
-    context.taskManager.updateTask(task.id, { status: 'in_progress' });
-    context.taskManager.updateTask(task.id, { status: 'review' });
+    context.runtime.claim_and_start({ task_id: task.id, agent_id: 'worker' });
+    const completed = context.runtime.complete_task({ task_id: task.id, agent_id: 'worker' });
+    expect(completed.new_status).toBe('review');
 
     const gate = context.qualityGateManager.create_quality_gate({
       task_id: task.id,
@@ -177,7 +176,7 @@ describe('TaskManager', () => {
     });
 
     expect(() => {
-      context?.taskManager.updateTask(task.id, { status: 'done' });
+      context?.runtime.approve_task({ task_id: task.id, agent_id: 'lead' });
     }).toThrowError(TasksError);
 
     context.qualityGateManager.create_gate_evaluation({
@@ -195,10 +194,10 @@ describe('TaskManager', () => {
     });
 
     expect(() => {
-      context?.taskManager.updateTask(task.id, { status: 'done' });
+      context?.runtime.approve_task({ task_id: task.id, agent_id: 'lead' });
     }).toThrowError(TasksError);
 
-    const ready = context.taskManager.updateTask(task.id, {
+    const ready = context.runtime.update_task(task.id, {
       acceptance_criteria: [
         {
           id: 'AC-001',
@@ -213,7 +212,7 @@ describe('TaskManager', () => {
 
     expect(ready.acceptance_criteria[0]?.verified).toBe(true);
 
-    const done = context.taskManager.updateTask(task.id, { status: 'done' });
-    expect(done.status).toBe('done');
+    const approved = context.runtime.approve_task({ task_id: task.id, agent_id: 'lead' });
+    expect(approved.status).toBe('approved');
   });
 });

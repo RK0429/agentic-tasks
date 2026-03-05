@@ -109,8 +109,11 @@ describe('Project and Sprint management', () => {
       'lead',
     );
 
-    context.runtime.update_task(task.id, { status: 'to_do' }, 'lead');
-    context.runtime.update_task(task.id, { status: 'in_progress' }, 'lead');
+    context.runtime.claim_and_start({
+      task_id: task.id,
+      agent_id: 'lead',
+      relay_session_id: 'relay-sprint',
+    });
 
     const completed = context.runtime.complete_sprint({
       sprint_id: sprint.id,
