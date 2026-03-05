@@ -1,6 +1,6 @@
 {
   "name": "@rk0429/agentic-tasks",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "AI agent task management system with MCP server, SQLite storage, and orchestration protocol",
   "type": "module",
   "license": "Apache-2.0",

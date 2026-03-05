@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-03-05
+
+### Added
+
+- `create_task`: auto-fill `parent_task_id` from `goal_id` when `parent_task_id` is omitted — simplifies task creation under a goal
+- `ping` MCP tool for health check (returns `status: "ok"` and `timestamp`)
+
 ## [0.3.0] - 2026-03-05
 
 ### Removed
