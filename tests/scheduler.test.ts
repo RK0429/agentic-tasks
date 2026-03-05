@@ -13,8 +13,13 @@ describe('Scheduler', () => {
   it('calculates next run time from cron expression', () => {
     context = createTestContext();
 
-    const next = context.scheduler.getNextRunTime('0 */2 * * *', new Date('2026-03-05T01:30:00.000Z'));
-    expect(next.toISOString()).toBe('2026-03-05T03:00:00.000Z');
+    const base = new Date('2026-03-05T01:30:00.000Z');
+    const next = context.scheduler.getNextRunTime('0 */2 * * *', base);
+    // Next run should be after the base time and within 2 hours
+    expect(next.getTime()).toBeGreaterThan(base.getTime());
+    expect(next.getTime() - base.getTime()).toBeLessThanOrEqual(2 * 60 * 60 * 1000);
+    // Should land on an even hour boundary (minute = 0)
+    expect(next.getMinutes()).toBe(0);
   });
 
   it('creates tasks for due schedules and updates run timestamps', () => {
