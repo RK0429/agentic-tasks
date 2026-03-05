@@ -63,7 +63,11 @@ export class AccessControl {
         return;
       }
       case 'approve_task': {
-        if (task.assignee === agent_id) {
+        const isCreator = task.created_by === agent_id;
+        const parent = task.parent_task_id ? this.get_task(task.parent_task_id) : null;
+        const isParentAssignee = parent?.assignee === agent_id;
+
+        if (task.assignee === agent_id && !isCreator && !isParentAssignee) {
           throw new TasksError(
             'access_denied',
             'assignee cannot approve own task (self-review prohibited)',
@@ -74,22 +78,19 @@ export class AccessControl {
             },
           );
         }
-        if (task.created_by !== agent_id) {
-          const parent = task.parent_task_id ? this.get_task(task.parent_task_id) : null;
-          if (!parent || parent.assignee !== agent_id) {
-            throw new TasksError(
-              'access_denied',
-              'only creator or parent assignee can approve task',
-              {
-                action,
-                task_id,
-                agent_id,
-                created_by: task.created_by,
-                parent_task_id: task.parent_task_id,
-                parent_assignee: parent?.assignee ?? null,
-              },
-            );
-          }
+        if (!isCreator && !isParentAssignee) {
+          throw new TasksError(
+            'access_denied',
+            'only creator or parent assignee can approve task',
+            {
+              action,
+              task_id,
+              agent_id,
+              created_by: task.created_by,
+              parent_task_id: task.parent_task_id,
+              parent_assignee: parent?.assignee ?? null,
+            },
+          );
         }
         return;
       }
