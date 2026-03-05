@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.5] - 2026-03-05
+
+### Added
+
+- CLI alias commands: `task create/list/update/get`, `goal create/list`, `dashboard`, `deps resolve/remove`
+- Quick Start examples in `--help` output
+- `goal_id` parameter for `create_task` MCP tool
+- `depth` filter for `list_tasks` MCP tool
+- `get_events` MCP tool for querying task events
+- `poll_events` MCP tool for cursor-based event polling
+- `import_mdtm` / `export_mdtm` MCP tools for MDTM migration
+
+### Changed
+
+- `next_task`: `project_id` is now optional (was required)
+
 ## [0.1.4] - 2026-03-05
 
 ### Added
