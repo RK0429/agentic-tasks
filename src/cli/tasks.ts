@@ -65,6 +65,7 @@ interface TaskUpdateCommandOptions {
   sourceRef?: string;
   expectedEffort?: ExpectedEffort;
   actualEffortMs?: string;
+  agentId?: string;
 }
 
 interface TaskListCommandOptions {
@@ -134,13 +135,28 @@ function resolveDbPath(command: Command): string {
   return current?.opts().db ?? DEFAULT_DB_PATH;
 }
 
-function configureTaskCreateCommand(command: Command): Command {
-  return command
+function configureTaskCreateCommand(
+  command: Command,
+  options: {
+    requireParentTaskId?: boolean;
+  } = {},
+): Command {
+  const configured = command
     .requiredOption('--title <title>', 'title')
     .option('--description <description>', 'description')
     .option('--priority <priority>', 'priority: critical|high|medium|low', 'medium')
-    .option('--task-type <task_type>', 'task_type: goal|task', 'task')
-    .option('--parent-task-id <parent_task_id>', 'parent_task_id')
+    .option('--task-type <task_type>', 'task_type: goal|task', 'task');
+
+  if (options.requireParentTaskId) {
+    configured.requiredOption(
+      '--parent-task-id <parent_task_id>',
+      'parent_task_id (required for task create)',
+    );
+  } else {
+    configured.option('--parent-task-id <parent_task_id>', 'parent_task_id');
+  }
+
+  return configured
     .option('--project-id <project_id>', 'project_id')
     .option('--sprint-id <sprint_id>', 'sprint_id')
     .option('--phase <phase>', 'phase')
@@ -165,7 +181,8 @@ function configureTaskUpdateCommand(command: Command): Command {
     .option('--phase <phase>', 'phase')
     .option('--source-ref <source_ref>', 'source_ref')
     .option('--expected-effort <expected_effort>', 'expected_effort')
-    .option('--actual-effort-ms <actual_effort_ms>', 'actual_effort_ms');
+    .option('--actual-effort-ms <actual_effort_ms>', 'actual_effort_ms')
+    .option('--agent-id <agent_id>', 'agent_id', 'system');
 }
 
 function configureTaskListCommand(command: Command): Command {
@@ -240,7 +257,7 @@ function runTaskUpdate(db_path: string, id: string, options: TaskUpdateCommandOp
       actual_effort_ms: options.actualEffortMs ? Number(options.actualEffortMs) : undefined,
     };
 
-    const task = context.taskManager.updateTask(id, updates);
+    const task = context.runtime.update_task(id, updates, options.agentId ?? 'system');
     printResult({ success: true, task });
   } finally {
     context.close();
@@ -344,8 +361,9 @@ Examples:
   $ agentic-tasks init
   $ agentic-tasks project create --name 'My Project'
   $ agentic-tasks goal create --title 'Goal 1' --project-id PROJ-001 --agent-id agent1
-  $ agentic-tasks task create --title 'Task 1' --project-id PROJ-001 --agent-id agent1
+  $ agentic-tasks task create --title 'Task 1' --parent-task-id GOAL-001 --project-id PROJ-001 --agent-id agent1
   $ agentic-tasks task list --project-id PROJ-001
+  $ agentic-tasks next --project-id PROJ-001 --assignee agent1
   $ agentic-tasks dashboard --project-id PROJ-001
 `,
     );
@@ -402,7 +420,9 @@ Examples:
 
   const task = program.command('task').description('タスク操作');
 
-  configureTaskCreateCommand(task.command('create').description('タスク作成（エイリアス）'))
+  configureTaskCreateCommand(task.command('create').description('タスク作成（エイリアス）'), {
+    requireParentTaskId: true,
+  })
     .option('--agent-id <agent_id>', 'agent_id')
     .action(function action(options) {
       const db_path = resolveDbPath(this);
@@ -467,6 +487,66 @@ Examples:
       try {
         const result = context.runtime.dashboard({
           project_id: options.projectId,
+        });
+        printResult({ success: true, ...result });
+      } finally {
+        context.close();
+      }
+    });
+
+  program
+    .command('next')
+    .description('次に着手可能なタスクを取得')
+    .option('--project-id <project_id>', 'project_id')
+    .option('--assignee <assignee>', 'assignee')
+    .action(function action(options) {
+      const db_path = resolveDbPath(this);
+      const context = createContext(db_path);
+
+      try {
+        const task = context.runtime.next_task({
+          project_id: options.projectId as string | undefined,
+          assignee: options.assignee as string | undefined,
+        });
+        printResult({ success: true, task });
+      } finally {
+        context.close();
+      }
+    });
+
+  program
+    .command('assign <task-id>')
+    .description('タスクの担当者を割り当て')
+    .requiredOption('--assignee <assignee>', 'assignee')
+    .requiredOption('--agent-id <agent_id>', 'agent_id')
+    .action(function action(taskId: string, options) {
+      const db_path = resolveDbPath(this);
+      const context = createContext(db_path);
+
+      try {
+        const result = context.runtime.assign_task({
+          task_id: taskId,
+          assignee: options.assignee as string,
+          agent_id: options.agentId as string,
+        });
+        printResult({ success: true, ...result });
+      } finally {
+        context.close();
+      }
+    });
+
+  program
+    .command('release <task-id>')
+    .description('タスクロックを解放')
+    .requiredOption('--agent-id <agent_id>', 'agent_id')
+    .action(function action(taskId: string, options) {
+      const db_path = resolveDbPath(this);
+      const context = createContext(db_path);
+
+      try {
+        const result = context.runtime.release_task({
+          task_id: taskId,
+          agent_id: options.agentId as string,
         });
         printResult({ success: true, ...result });
       } finally {
@@ -783,14 +863,20 @@ Examples:
     });
 
   deps
-    .command('resolve <taskId>')
+    .command('resolve [taskId]')
     .description('依存関係の解決状態を確認')
-    .action(function action(taskId: string) {
+    .option('--task-id <task_id>', 'task_id')
+    .action(function action(taskId: string | undefined, options) {
+      const resolvedTaskId = taskId ?? (options.taskId as string | undefined);
+      if (!resolvedTaskId) {
+        throw new TasksError('invalid_task_id', 'task_id is required');
+      }
+
       const db_path = resolveDbPath(this);
       const context = createContext(db_path);
 
       try {
-        const result = context.runtime.resolve_dependencies(taskId);
+        const result = context.runtime.resolve_dependencies(resolvedTaskId);
         printResult({ success: true, ...result });
       } finally {
         context.close();
