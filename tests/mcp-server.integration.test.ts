@@ -56,7 +56,6 @@ describe('MCP server integration', () => {
       'ping',
       'decompose_task',
       'claim_and_start',
-      'extend_lock',
       'complete_task',
       'approve_task',
       'block_task',
@@ -66,7 +65,6 @@ describe('MCP server integration', () => {
       'escalate_task',
       'delegate_task',
       'create_quality_gate',
-      'create_checkpoint',
       'create_goal',
       'list_goal_tree',
       'get_execution_view',
@@ -74,7 +72,6 @@ describe('MCP server integration', () => {
       'list_projects',
       'create_sprint',
       'complete_sprint',
-      'create_schedule',
       'get_events',
       'poll_events',
     ]) {
@@ -247,22 +244,6 @@ describe('MCP server integration', () => {
     expect(subtaskPayload.success).toBe(true);
     const summary = subtaskPayload.summary as { by_status: Record<string, number> };
     expect(summary.by_status.done).toBe(2);
-
-    const scheduleResult = (await client.callTool({
-      name: 'create_schedule',
-      arguments: {
-        name: 'MCP Schedule',
-        cron: '* * * * *',
-        project_id: project.id,
-        task_template: {
-          title: 'MCP Scheduled Task',
-          task_type: 'task',
-          parent_task_id: goalId,
-        },
-      },
-    })) as CallToolResult;
-    const schedulePayload = parseToolText(scheduleResult);
-    expect(schedulePayload.success).toBe(true);
 
     const completeSprint = (await client.callTool({
       name: 'complete_sprint',

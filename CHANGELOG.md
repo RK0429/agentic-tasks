@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-03-05
+
+### Removed
+
+- Removed 8 MCP tools: `stale_lock_cleanup`, `create_checkpoint`, `list_checkpoints`, `trigger_replan`, `create_schedule`, `update_schedule`, `list_schedules`, `extend_lock`
+- These operations remain available via CLI/runtime APIs and are no longer exposed in MCP
+
 ## [0.4.0] - 2026-03-06
 
 ### Added
